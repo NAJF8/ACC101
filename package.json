@@ -1,0 +1,51 @@
+{
+  "name": "101-coffee-cost-finance",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local 101 COFFEE cost, accounting, payroll, inventory and permissions system.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "electron": "electron .",
+    "start": "concurrently \"npm run dev\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "build": "vite build",
+    "dist": "electron-builder",
+    "rebuild:native": "electron-rebuild -f -w better-sqlite3",
+    "postinstall": "electron-rebuild -f -w better-sqlite3",
+    "check": "node --check main.js && node --check preload.js && vite build"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.0.2",
+    "better-sqlite3": "^12.2.0",
+    "concurrently": "^9.2.1",
+    "electron-is-dev": "^3.0.1",
+    "firebase": "^12.18.0",
+    "lucide-react": "^0.542.0",
+    "recharts": "^3.1.2",
+    "vite": "^7.1.4",
+    "wait-on": "^8.0.4"
+  },
+  "devDependencies": {
+    "electron": "^44.2.0",
+    "electron-builder": "^26.0.12",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "typescript": "^5.9.2"
+  },
+  "build": {
+    "appId": "coffee101.finance.local",
+    "productName": "101 COFFEE Finance",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    }
+  }
+}
