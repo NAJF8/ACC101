@@ -1,0 +1,11 @@
+node_modules/
+dist/
+release/
+data/*.db
+data/*.db-*
+*.log
+.vite/
+.electron/
+.firebase/
+.agents/
+.claude/
