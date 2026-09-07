@@ -649,3 +649,8 @@ function units() {
 }
 
 createRoot(document.getElementById('root')).render(<App />);
+
+
+function Materials(props) { return <div className='p-4 text-center'>صفحة المواد قيد التطوير</div>; }
+function Employees(props) { return <div className='p-4 text-center'>صفحة الموظفين قيد التطوير</div>; }
+function SettingsPage(props) { return <div className='p-4 text-center'>صفحة الإعدادات قيد التطوير</div>; }
