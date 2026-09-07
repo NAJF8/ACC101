@@ -76,8 +76,9 @@ export const api = {
       currentUserProfile = userProfile;
       return api.session();
     } catch (err) {
+      console.error("Login Error:", err);
       if (err.message === 'هذا الحساب موقوف.' || err.message === 'هذا الحساب غير مخول لاستخدام النظام.') throw err;
-      throw new Error('فشل تسجيل الدخول.');
+      throw new Error('فشل تسجيل الدخول: ' + (err.code || err.message));
     }
   },
   
