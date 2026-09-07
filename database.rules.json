@@ -1,7 +1,57 @@
 {
-  /* Visit https://firebase.google.com/docs/database/security to learn more about security rules. */
   "rules": {
     ".read": false,
-    ".write": false
+    ".write": false,
+    "users": {
+      "$uid": {
+        ".read": "auth != null && (auth.uid == $uid || root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager')",
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin')"
+      },
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager')"
+    },
+    "categories": {
+      ".read": "auth != null",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager')"
+    },
+    "purchases": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() != 'viewer')",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() != 'viewer')"
+    },
+    "expenses": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() != 'viewer')",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() != 'viewer')"
+    },
+    "sales": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() != 'viewer')",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() != 'viewer')"
+    },
+    "inventory": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() != 'viewer')",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager')"
+    },
+    "materials": {
+      ".read": "auth != null",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager')"
+    },
+    "products": {
+      ".read": "auth != null",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager')"
+    },
+    "suppliers": {
+      ".read": "auth != null",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager')"
+    },
+    "employees": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager')",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager')"
+    },
+    "payroll": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager')",
+      ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager')"
+    },
+    "audit": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin')",
+      ".write": "auth != null"
+    }
   }
 }

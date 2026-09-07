@@ -9,137 +9,9 @@ import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Pie, PieChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis
 } from 'recharts';
-import { initializeApp } from 'firebase/app';
-import { getAnalytics } from 'firebase/analytics';
+import { api, defaultCats, permissionGroups } from './src/services/api.js';
 import './styles.css';
 
-const firebaseConfig = {
-  apiKey: "AIzaSyCzmUhkN29ey7B1BpexJvgh8miI2RlAn74",
-  authDomain: "acc-101.firebaseapp.com",
-  projectId: "acc-101",
-  storageBucket: "acc-101.firebasestorage.app",
-  messagingSenderId: "1027289206201",
-  appId: "1:1027289206201:web:3c58deb7fe132066723a68",
-  measurementId: "G-0PG5V9ZQWJ"
-};
-
-const firebaseApp = initializeApp(firebaseConfig);
-if (typeof window !== 'undefined' && !window.coffeeApi) {
-  try { getAnalytics(firebaseApp); } catch (e) {}
-}
-
-function createWebFallbackApi() {
-  const getStore = (key, defaultVal) => {
-    try {
-      const v = localStorage.getItem('coffee101_' + key);
-      return v ? JSON.parse(v) : defaultVal;
-    } catch { return defaultVal; }
-  };
-  const setStore = (key, val) => {
-    try { localStorage.setItem('coffee101_' + key, JSON.stringify(val)); } catch {}
-  };
-
-  const defaultCats = [
-    { id: 1, name_ar: 'قهوة', name_en: 'Coffee', type: 'مواد أولية', icon: 'coffee', color: '#1f7a4d', sort_order: 1, active: 1 },
-    { id: 2, name_ar: 'شاي', name_en: 'Tea', type: 'مواد أولية', icon: 'cup', color: '#427a39', sort_order: 2, active: 1 },
-    { id: 3, name_ar: 'حليب', name_en: 'Milk', type: 'مواد أولية', icon: 'milk', color: '#9c7a47', sort_order: 3, active: 1 },
-    { id: 4, name_ar: 'سيربات', name_en: 'Syrups', type: 'مواد أولية', icon: 'droplet', color: '#b97d3c', sort_order: 4, active: 1 },
-    { id: 5, name_ar: 'أكواب', name_en: 'Cups', type: 'مخزون', icon: 'package', color: '#606c38', sort_order: 5, active: 1 },
-    { id: 6, name_ar: 'مواد تنظيف', name_en: 'Cleaning', type: 'مصاريف تشغيلية', icon: 'spray', color: '#3a6b66', sort_order: 6, active: 1 },
-    { id: 7, name_ar: 'إيجار', name_en: 'Rent', type: 'مصاريف تشغيلية', icon: 'home', color: '#7f5539', sort_order: 7, active: 1 },
-    { id: 8, name_ar: 'كهرباء', name_en: 'Electricity', type: 'خدمات', icon: 'bolt', color: '#b45309', sort_order: 8, active: 1 },
-    { id: 9, name_ar: 'إنترنت', name_en: 'Internet', type: 'خدمات', icon: 'wifi', color: '#386641', sort_order: 9, active: 1 },
-    { id: 10, name_ar: 'ماء', name_en: 'Water', type: 'خدمات', icon: 'droplet', color: '#00CED1', sort_order: 10, active: 1 },
-    { id: 11, name_ar: 'مولدة', name_en: 'Generator', type: 'خدمات', icon: 'settings', color: '#808080', sort_order: 11, active: 1 },
-    { id: 12, name_ar: 'صيانة', name_en: 'Maintenance', type: 'مصاريف تشغيلية', icon: 'tool', color: '#FF6347', sort_order: 12, active: 1 },
-    { id: 13, name_ar: 'تسويق', name_en: 'Marketing', type: 'تسويق', icon: 'megaphone', color: '#bc6c25', sort_order: 13, active: 1 },
-    { id: 14, name_ar: 'إعلانات', name_en: 'Ads', type: 'تسويق', icon: 'megaphone', color: '#FF69B4', sort_order: 14, active: 1 },
-    { id: 15, name_ar: 'نقل', name_en: 'Transport', type: 'مصاريف تشغيلية', icon: 'truck', color: '#DAA520', sort_order: 15, active: 1 },
-    { id: 16, name_ar: 'رواتب', name_en: 'Payroll', type: 'رواتب', icon: 'wallet', color: '#624c33', sort_order: 16, active: 1 },
-    { id: 17, name_ar: 'أخرى', name_en: 'Other', type: 'أخرى', icon: 'more', color: '#6b7280', sort_order: 17, active: 1 }
-  ];
-
-  if (!getStore('categories', null)) setStore('categories', defaultCats);
-
-  const defaultSession = {
-    user: { id: 1, name: 'مدير النظام (Web)', username: 'admin', role: 'super_admin' },
-    permissions: Object.values(permissionGroups).flat()
-  };
-
-  return {
-    login: async (creds) => {
-      if (creds.username === 'admin' && creds.password === 'admin123') {
-        setStore('session', defaultSession);
-        return defaultSession;
-      }
-      throw new Error('اسم المستخدم أو كلمة المرور غير صحيحة.');
-    },
-    logout: async () => { setStore('session', null); return true; },
-    session: async () => getStore('session', null),
-    list: async (entity) => getStore(entity, []),
-    create: async (entity, payload) => {
-      const items = getStore(entity, []);
-      const newItem = { ...payload, id: Date.now(), created_at: new Date().toISOString() };
-      items.unshift(newItem);
-      setStore(entity, items);
-      return newItem;
-    },
-    update: async (entity, id, payload) => {
-      let items = getStore(entity, []);
-      items = items.map(item => item.id == id ? { ...item, ...payload, updated_at: new Date().toISOString() } : item);
-      setStore(entity, items);
-      return true;
-    },
-    remove: async (entity, id) => {
-      let items = getStore(entity, []);
-      items = items.filter(item => item.id != id);
-      setStore(entity, items);
-      return true;
-    },
-    dashboard: async () => {
-      const exp = getStore('expenses', []);
-      const pur = getStore('purchases', []);
-      const sal = getStore('sales', []);
-      const rev = sal.reduce((s, x) => s + Number(x.revenue || 0), 0);
-      const expTotal = exp.reduce((s, x) => s + Number(x.amount || 0), 0);
-      const purTotal = pur.reduce((s, x) => s + Number(x.total_price || 0), 0);
-      return {
-        metrics: {
-          revenue: rev,
-          cogs: 0,
-          grossProfit: rev,
-          netProfit: rev - expTotal,
-          profitMargin: rev ? ((rev - expTotal) / rev) * 100 : 0,
-          expenses: expTotal,
-          purchases: purTotal,
-          inventoryValue: 0,
-          lowStockCount: 0
-        },
-        monthly: [],
-        expenseByCategory: [],
-        employeeMini: null,
-        permissions: defaultSession.permissions
-      };
-    },
-    productCost: async () => ({ total: 0, items: [] }),
-    backup: async () => {
-      alert('النسخ الاحتياطي في نسخة الويب: استخدم زر التصدير لحفظ البيانات بصيغة ملف.');
-      return null;
-    },
-    exportExcel: async (entity) => {
-      const items = getStore(entity, []);
-      const blob = new Blob([JSON.stringify(items, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${entity}.json`;
-      a.click();
-      return entity;
-    }
-  };
-}
-
-const api = (typeof window !== 'undefined' && window.coffeeApi) ? window.coffeeApi : createWebFallbackApi();
 const money = (value) => `${Number(value || 0).toLocaleString('en-US', { maximumFractionDigits: 0 })} د.ع`;
 const today = () => new Date().toISOString().slice(0, 10);
 const month = () => new Date().toISOString().slice(0, 7);
@@ -159,24 +31,7 @@ const sections = [
   { id: 'audit', label: 'Audit Log', icon: ShieldCheck, permission: 'audit.view' }
 ];
 
-const permissionGroups = {
-  Financial: [
-    'financial.view_revenue', 'financial.view_cogs', 'financial.view_gross_profit',
-    'financial.view_net_profit', 'financial.view_profit_margin',
-    'financial.view_profit_by_category', 'financial.view_profit_by_product',
-    'financial.view_financial_dashboard', 'financial.view_profitability_reports'
-  ],
-  Purchases: ['purchases.view', 'purchases.create', 'purchases.edit', 'purchases.delete'],
-  Expenses: ['expenses.view', 'expenses.create', 'expenses.edit', 'expenses.delete'],
-  Inventory: ['inventory.view', 'inventory.adjust', 'inventory.count', 'materials.view', 'materials.create', 'materials.edit', 'materials.delete'],
-  Sales: ['sales.view', 'sales.create', 'sales.edit', 'sales.delete'],
-  Products: ['products.view', 'products.create', 'products.edit', 'products.delete'],
-  Suppliers: ['suppliers.view', 'suppliers.create', 'suppliers.edit', 'suppliers.delete'],
-  Employees: ['employees.view', 'employees.create', 'employees.edit', 'employees.disable', 'payroll.view', 'payroll.create', 'payroll.edit'],
-  Reports: ['reports.view', 'reports.export', 'imports.create', 'imports.undo'],
-  Backups: ['backups.create', 'backups.restore'],
-  System: ['users.view', 'users.create', 'users.edit', 'users.disable', 'settings.view', 'settings.edit', 'audit.view', 'system.reset']
-};
+
 
 function App() {
   const [session, setSession] = useState(null);

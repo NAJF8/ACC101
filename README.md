@@ -1,113 +1,81 @@
 # 101 COFFEE - Cost & Finance Management System
 
-نظام محلي بالكامل لإدارة محاسبة وتكاليف ومصاريف 101 COFFEE.
+نظام إدارة محاسبة وتكاليف ومصاريف 101 COFFEE. تم تحديثه ليعمل بشكل سحابي باستخدام Firebase (Authentication + Realtime Database) ليكون المصدر الرئيسي للبيانات (Source of Truth) بدلاً من SQLite، مما يسمح بالتزامن الحي عبر أجهزة متعددة.
 
-## التشغيل
+## التشغيل المحلي (Web)
 
 ```bash
 npm install
-npm start
+npm run dev
 ```
 
-الحساب الأولي:
+## إعدادات Firebase
 
-- Username: `admin`
-- Password: `admin123`
-- Role: `Super Admin`
+هذا المشروع يستخدم Firebase بشكل كامل. للتشغيل، تأكد من وجود ملف `.env` (الذي لا يُرفع إلى GitHub للأمان) يحتوي على:
+```
+VITE_FIREBASE_API_KEY=...
+VITE_FIREBASE_AUTH_DOMAIN=...
+VITE_FIREBASE_DATABASE_URL=...
+VITE_FIREBASE_PROJECT_ID=...
+VITE_FIREBASE_STORAGE_BUCKET=...
+VITE_FIREBASE_MESSAGING_SENDER_ID=...
+VITE_FIREBASE_APP_ID=...
+```
 
-## بناء نسخة Windows
+### الحساب الأولي (Super Admin)
+بما أن النظام يعتمد على Firebase Auth، يجب عليك إنشاء الحساب الأولي من خلال لوحة تحكم Firebase Authentication وتفعيل Email/Password، ثم إضافة المستخدم إلى Realtime Database بصلاحيات `super_admin`:
+```json
+{
+  "name": "Super Admin",
+  "username": "admin@101coffee.local",
+  "role": "super_admin",
+  "status": "active"
+}
+```
+
+لا توجد حسابات وهمية مثل `admin/admin123` مسجلة في الكود.
+
+## النشر والاستضافة (Deployment)
+
+النظام مهيأ ليتم نشره على منصتين:
+
+### 1. GitHub Pages
+واجهة عرض فقط وتستضيف نسخة Frontend، وتبقى البيانات في Firebase.
+يتم النشر تلقائياً عبر GitHub Actions عند الدفع إلى فرع `main`.
+
+```bash
+npm run build:github
+# يقوم ببناء المشروع مع Base Path مخصص لـ GitHub Pages
+```
+
+### 2. Firebase Hosting
+النسخة الإنتاجية الأساسية.
+
+```bash
+npm run build:firebase
+firebase deploy --only hosting,database
+```
+
+## نظام الصلاحيات والأدوار (Roles & Permissions)
+
+- `super_admin`: كل الصلاحيات.
+- `manager`: صلاحيات إدارية ومالية واسعة.
+- `supervisor`: إدارة عمليات وإدخال.
+- `employee`: إدخال بيانات فقط، ولا يملك صلاحية رؤية الأرباح الحساسة.
+- `viewer`: مشاهدة محدودة.
+
+قواعد البيانات محصنة عبر `database.rules.json` بحيث لا يتمكن أي شخص غير مخول أو Employee من قراءة التقارير الحساسة من قاعدة البيانات، حتى من خلال Developer Tools.
+
+## بناء نسخة Windows (Electron)
+
+النظام لا يزال يدعم إصدار سطح المكتب، والذي سيستخدم نفس بيانات Firebase عندما يكون متصلاً بالإنترنت:
 
 ```bash
 npm run build
 npm run dist
 ```
-
 سيتم إنشاء ملفات النسخة داخل مجلد `release`.
 
-## قاعدة البيانات
+## التقارير (Reports)
 
-النظام يستخدم SQLite محلياً عبر `better-sqlite3`.
-
-موقع قاعدة البيانات محلي داخل مجلد المشروع:
-
-`acc2/data/101coffee.db` (أو `%APPDATA%/101-coffee-cost-finance/data/101coffee.db` عند التثبيت كحزمة)
-
-الجداول الأساسية:
-
-- `users`
-- `user_permission_overrides`
-- `categories`
-- `materials`
-- `products`
-- `recipe_items`
-- `purchase_batches`
-- `supplier_payments`
-- `expenses`
-- `sales`
-- `employees`
-- `payroll`
-- `settings`
-- `audit_log`
-
-## الميزات المنفذة
-
-- واجهة عربية RTL بهوية 101 COFFEE.
-- العملة الافتراضية: الدينار العراقي `د.ع`.
-- Dashboard يحذف القيم الحساسة إذا لم يملك المستخدم صلاحيتها.
-- POS سريع لتسجيل المصاريف حسب الأقسام.
-- إدارة مشتريات المواد مع حفظ كل دفعة Purchase Batch بشكل مستقل.
-- حساب سعر الوحدة تلقائياً.
-- حساب Weighted Average Cost للمخزون.
-- عرض المخزون الحالي ومتوسط التكلفة وقيمة المخزون وآخر/أعلى/أقل سعر.
-- إدارة مواد ومنتجات ووصفات.
-- حساب COGS والربح الإجمالي للمبيعات من تكلفة الوصفة الحالية.
-- مصاريف تشغيلية ومصاريف متكررة كبيانات قابلة للتسجيل.
-- موظفون ورواتب: الراتب الأساسي، السلفة، الخصم، المكافأة، صافي المدفوع.
-- موردون وديون: إجمالي المشتريات، المدفوع، المتبقي.
-- Users & Permissions بنظام RBAC وأذونات تفصيلية.
-- Custom permission overrides لكل مستخدم.
-- حماية Super Admin، ويجب أن يبقى Super Admin فعال واحد على الأقل.
-- Audit Log لتسجيل الدخول والتغييرات وتغييرات الصلاحيات.
-- Backup لملف SQLite.
-- Export Excel للجداول المسموحة حسب صلاحيات المستخدم.
-
-## الصلاحيات
-
-الأدوار الافتراضية:
-
-- `super_admin`: كل الصلاحيات.
-- `manager`: صلاحيات إدارية ومالية واسعة، بدون reset/restore حساس افتراضياً.
-- `supervisor`: تشغيل ومخزون ومبيعات ومصاريف مع أرباح حسب الإعداد.
-- `employee`: إدخال بيانات وعملياته فقط، بدون أرباح أو تقارير مالية حساسة.
-- `viewer`: مشاهدة محدودة.
-
-الصلاحيات الحساسة مثل:
-
-- `financial.view_revenue`
-- `financial.view_cogs`
-- `financial.view_gross_profit`
-- `financial.view_net_profit`
-- `financial.view_profit_margin`
-
-يتم التحقق منها في Electron main process قبل إرسال القيم للواجهة.
-
-## الفحوصات المنفذة
-
-```bash
-npm run check
-```
-
-يتضمن:
-
-- `node --check main.js`
-- `node --check preload.js`
-- `vite build`
-
-النتيجة: نجح البناء.
-
-## ملاحظات تحتاج بيانات حقيقية لاحقاً
-
-- استيراد Excel القديم يحتاج ملف Excel فعلي داخل المشروع لتحليل الأعمدة وربطها.
-- صور/PDF الفواتير لم تربط بعد بمجلد مرفقات محلي.
-- Approval workflow موجود كبداية في حالة المصاريف الكبيرة، لكن شاشة الموافقات التفصيلية لم تفصل بعد.
-- Monthly Closing و Undo Import و Restore Database تحتاج شاشات تأكيد وسجل عمليات أوسع قبل استخدامها في الإنتاج.
+يتم تصدير البيانات إلى Excel مباشرة من البيانات المستلمة عبر Firebase.

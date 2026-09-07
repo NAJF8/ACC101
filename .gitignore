@@ -9,3 +9,7 @@ data/*.db-*
 .firebase/
 .agents/
 .claude/
+
+.env
+firebase-debug.log
+serviceAccount*.json
