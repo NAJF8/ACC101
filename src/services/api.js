@@ -1,4 +1,4 @@
-import { auth, db, ref, set, get, push, update, remove, onValue, serverTimestamp, signInWithEmailAndPassword, signOut } from './firebase.js';
+import { auth, db, ref, set, get, push, update, remove, onValue, serverTimestamp, signOut, GoogleAuthProvider, signInWithPopup } from './firebase.js';
 
 export const permissionGroups = {
   Financial: [
@@ -50,23 +50,26 @@ async function fetchUserProfile(uid) {
 }
 
 export const api = {
-  login: async (creds) => {
+  login: async () => {
     try {
-      const userCredential = await signInWithEmailAndPassword(auth, creds.username, creds.password);
+      const provider = new GoogleAuthProvider();
+      const userCredential = await signInWithPopup(auth, provider);
       const userProfile = await fetchUserProfile(userCredential.user.uid);
+      
       if (!userProfile) {
         await signOut(auth);
-        throw new Error('لم يتم العثور على ملف تعريف المستخدم.');
+        throw new Error('هذا الحساب غير مخول لاستخدام النظام.');
       }
       if (userProfile.active === false || userProfile.status === 'disabled') {
         await signOut(auth);
-        throw new Error('الحساب موقوف');
+        throw new Error('هذا الحساب موقوف.');
       }
+      
       currentUserProfile = userProfile;
       return api.session();
     } catch (err) {
-      if (err.message === 'الحساب موقوف' || err.message === 'لم يتم العثور على ملف تعريف المستخدم.') throw err;
-      throw new Error('اسم المستخدم أو كلمة المرور غير صحيحة.');
+      if (err.message === 'هذا الحساب موقوف.' || err.message === 'هذا الحساب غير مخول لاستخدام النظام.') throw err;
+      throw new Error('فشل تسجيل الدخول.');
     }
   },
   

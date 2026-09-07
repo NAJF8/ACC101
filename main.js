@@ -368,7 +368,7 @@ function seed() {
     db.prepare(`
       INSERT INTO users (name, username, password_hash, role, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run('مدير النظام', 'admin', hashPassword('admin123'), 'super_admin', 'active', t, t);
+    `).run('Super Admin', 'admin@101coffee.local', hashPassword('initial_password_change_me'), 'super_admin', 'active', t, t);
   }
 
   const categoryCount = db.prepare('SELECT COUNT(*) AS c FROM categories').get().c;

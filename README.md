@@ -33,7 +33,6 @@ VITE_FIREBASE_APP_ID=...
 }
 ```
 
-لا توجد حسابات وهمية مثل `admin/admin123` مسجلة في الكود.
 
 ## النشر والاستضافة (Deployment)
 
