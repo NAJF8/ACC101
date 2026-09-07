@@ -1,4 +1,4 @@
-import { auth, db, ref, set, get, push, update, remove, onValue, serverTimestamp, signOut, GoogleAuthProvider, signInWithPopup } from './firebase.js';
+import { auth, db, ref, set, get, push, update, remove, onValue, serverTimestamp, signOut, GoogleAuthProvider, signInWithPopup, onAuthStateChanged } from './firebase.js';
 
 export const permissionGroups = {
   Financial: [
@@ -40,6 +40,14 @@ export const defaultCats = [
 ];
 
 let currentUserProfile = null;
+let authInitialized = false;
+let authWaitPromise = new Promise((resolve) => {
+  const unsubscribe = onAuthStateChanged(auth, (user) => {
+    authInitialized = true;
+    resolve(user);
+    unsubscribe();
+  });
+});
 
 async function fetchUserProfile(uid) {
   const snap = await get(ref(db, `users/${uid}`));
@@ -80,6 +88,9 @@ export const api = {
   },
 
   session: async () => {
+    if (!authInitialized) {
+      await authWaitPromise;
+    }
     if (!auth.currentUser) return null;
     if (!currentUserProfile) {
       currentUserProfile = await fetchUserProfile(auth.currentUser.uid);
