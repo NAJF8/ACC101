@@ -15,7 +15,7 @@ const dbUrl = import.meta.env.VITE_FIREBASE_DATABASE_URL;
 if (dbUrl) {
   firebaseConfig.databaseURL = dbUrl;
 } else {
-  firebaseConfig.databaseURL = "https://acc-101-default-rtdb.firebaseio.com";
+  firebaseConfig.databaseURL = "https://acc-101-default-rtdb.europe-west1.firebasedatabase.app";
 }
 
 const app = initializeApp(firebaseConfig);
