@@ -2,54 +2,48 @@
   "name": "101-coffee-cost-finance",
   "version": "0.1.0",
   "private": true,
-  "description": "Local 101 COFFEE cost, accounting, payroll, inventory and permissions system.",
-  "main": "main.js",
+  "description": "101 COFFEE Finance web application.",
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
-    "electron": "electron .",
-    "start": "concurrently \"npm run dev\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "dev": "vite --host localhost",
+    "start": "vite --host localhost",
     "build": "vite build",
-    "dist": "electron-builder",
-    "rebuild:native": "electron-rebuild -f -w better-sqlite3",
-    "postinstall": "electron-rebuild -f -w better-sqlite3",
-    "check": "node --check main.js && node --check preload.js && vite build",
+    "test:finance": "node scripts/finance-regression.mjs",
+    "test:inventory": "node scripts/inventory-regression.mjs && node scripts/inventory-analytics-regression.mjs",
+    "test:emulator": "node scripts/final-emulator-regression.mjs && node scripts/sale-permission-regression.mjs",
+    "test:debts": "node scripts/debt-regression.mjs",
+    "test:expense-debt": "node scripts/expense-debt-emulator.mjs",
+    "test:barcode": "node scripts/barcode-camera-regression.mjs",
+    "test:phase2-financial": "node scripts/phase2-financial-regression.mjs",
+    "test:chart": "node scripts/chart-regression.mjs",
+    "test:comparison": "node scripts/comparison-regression.mjs",
+    "test:realtime": "node scripts/realtime-regression.mjs",
+    "test:month-carry": "node scripts/month-carry-regression.mjs",
+    "test:improvements": "node scripts/notification-regression.mjs && node scripts/improvements-emulator-regression.mjs",
+    "test:rules-matrix": "node scripts/rules-matrix-regression.mjs",
+    "test:closed-month": "node scripts/closed-month-rules-regression.mjs",
+    "test:payment-review": "node scripts/payment-review-regression.mjs",
+    "test:shift": "node scripts/shift-regression.mjs",
+    "test:owner-cash": "node scripts/owner-cash-regression.mjs",
+    "test:partners-establishment-reset": "node scripts/partners-establishment-reset-regression.mjs",
+    "check": "node scripts/check-permissions.mjs && vite build",
     "build:firebase": "vite build --mode firebase",
     "build:github": "vite build --mode github && node -e \"require('fs').copyFileSync('dist/index.html', 'dist/404.html')\""
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.2",
-    "better-sqlite3": "^12.2.0",
-    "concurrently": "^9.2.1",
-    "electron-is-dev": "^3.0.1",
+    "@zxing/browser": "^0.2.1",
     "firebase": "^12.18.0",
-    "jsdom": "^29.1.1",
+    "jsbarcode": "^3.12.3",
     "lucide-react": "^0.542.0",
-    "puppeteer": "^25.10.0",
+    "qrcode": "^1.5.4",
     "recharts": "^3.1.2",
     "vite": "^7.1.4",
-    "wait-on": "^8.0.4"
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "electron": "^44.2.0",
-    "electron-builder": "^26.0.12",
+    "firebase-admin": "^14.4.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "typescript": "^5.9.2"
-  },
-  "build": {
-    "appId": "coffee101.finance.local",
-    "productName": "101 COFFEE Finance",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "dist/**/*",
-      "main.js",
-      "preload.js",
-      "package.json"
-    ],
-    "win": {
-      "target": "nsis"
-    }
   }
 }

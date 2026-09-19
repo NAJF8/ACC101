@@ -1,4 +1,4 @@
-# 101 COFFEE - Cost & Finance Management System
+# 101 COFFEE Finance
 
 نظام إدارة محاسبة وتكاليف ومصاريف 101 COFFEE. تم تحديثه ليعمل بشكل سحابي باستخدام Firebase (Authentication + Realtime Database) ليكون المصدر الرئيسي للبيانات (Source of Truth) بدلاً من SQLite، مما يسمح بالتزامن الحي عبر أجهزة متعددة.
 
@@ -65,16 +65,6 @@ firebase deploy --only hosting,database
 
 قواعد البيانات محصنة عبر `database.rules.json` بحيث لا يتمكن أي شخص غير مخول أو Employee من قراءة التقارير الحساسة من قاعدة البيانات، حتى من خلال Developer Tools.
 
-## بناء نسخة Windows (Electron)
-
-النظام لا يزال يدعم إصدار سطح المكتب، والذي سيستخدم نفس بيانات Firebase عندما يكون متصلاً بالإنترنت:
-
-```bash
-npm run build
-npm run dist
-```
-سيتم إنشاء ملفات النسخة داخل مجلد `release`.
-
 ## التقارير (Reports)
 
-يتم تصدير البيانات إلى Excel مباشرة من البيانات المستلمة عبر Firebase.
+يتم تصدير البيانات إلى ملفات XLSX مباشرة من البيانات المستلمة عبر Firebase.

@@ -1,0 +1,13 @@
+import { connectAuthEmulator, signInAnonymously, signOut } from 'firebase/auth';
+import { connectDatabaseEmulator, ref, set } from 'firebase/database';
+const host = process.env.FIREBASE_EMULATOR_HOST || '127.0.0.1';
+const { auth, db } = await import('../src/services/firebase.js');
+connectAuthEmulator(auth, `http://${host}:9099`, { disableWarnings: true }); connectDatabaseEmulator(db, host, 9000);
+const owner = (p) => `http://${host}:9000/${p}.json?ns=acc-101-default-rtdb&access_token=owner`;
+const put = async (p, v) => { const r = await fetch(owner(p), { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(v) }); if (!r.ok) throw Error(p); };
+const denied = async (fn) => { try { await fn(); return false; } catch { return true; } }; const results = {}; const record = (k, v) => { results[k] = !!v; if (!v) console.error(`FAIL: ${k}`); };
+await put('', null); await put('monthly_periods', { '2026-06': { month: '2026-06', status: 'closed' }, '2026-07': { month: '2026-07', status: 'open' } }); await signInAnonymously(auth); const uid = auth.currentUser.uid; await put(`users/${uid}`, { id: uid, role: 'manager', active: true }); await new Promise((r) => setTimeout(r, 150));
+const fixture = (month) => ({ id: `closed-${month}`, month, date: `${month}-10`, amount: 1, total_after_discount: 1, payment_method: 'cash', created_by: uid });
+for (const [name, path] of [['sale', 'sales'], ['purchase', 'purchases'], ['expense', 'expenses'], ['payroll', 'payroll'], ['owner_deposit', 'owner_deposits'], ['owner_withdrawal', 'owner_withdrawals']]) record(`closed_${name}_denied`, await denied(() => set(ref(db, `${path}/closed-${name}`), fixture('2026-06'))));
+record('carry_forward_target_open', await (async () => { try { await set(ref(db, 'cash_carry_forwards/2026-07'), { idempotency_key: 'closed-matrix-carry', month: '2026-07', amount: 1, created_by: uid }); return true; } catch { return false; } })());
+await signOut(auth); console.log(JSON.stringify({ emulator: true, production_target_used: 'NO', results }, null, 2)); process.exit(Object.values(results).some((v) => !v) ? 1 : 0);
