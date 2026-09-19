@@ -33,6 +33,7 @@ await ownerSet(`users/${managerUid}`, { id: managerUid, role: 'manager', active:
 await ownerSet('monthly_periods', { '2026-06': { month: '2026-06', status: 'closed' }, '2026-09': { month: '2026-09', status: 'open' }, '2026-10': { month: '2026-10', status: 'open' } });
 await ownerSet('inventory_items', {
   milk: { id: 'milk', name_ar: 'TEST Milk', quantity: 100, base_unit: 'piece', unit: 'piece', average_unit_cost: 10, purchase_price: 10 },
+  partialMilk: { id: 'partialMilk', name_ar: 'TEST Partial Milk', quantity: 100, base_unit: 'piece', unit: 'piece', average_unit_cost: 10, purchase_price: 10 },
   syrup: { id: 'syrup', name_ar: 'TEST Syrup Mojito', quantity: 0, base_unit: 'ml', unit: 'bottle', purchase_unit: 'bottle', units_per_package: 1000, average_unit_cost: 0, purchase_price: 12000 },
   itemA: { id: 'itemA', name_ar: 'TEST Dessert A', quantity: 0, base_unit: 'piece', unit: 'piece', category_id: 'A', barcode: '6291234567890', internal_barcode: '101-MAT-TEST001', purchase_price: 100 },
   itemB: { id: 'itemB', name_ar: 'TEST Category B', quantity: 0, base_unit: 'piece', unit: 'piece', category_id: 'B', barcode: '6299876543210', purchase_price: 100 }
@@ -59,6 +60,20 @@ record('mojito_sale_net_and_cash', mojitoSale.total_after_discount === 8000 && m
 record('mojito_recipe_consumption', Number((await ownerRead('inventory_items/syrup'))?.quantity) === 960 && mojitoMoves.length === 1 && mojitoMoves[0].quantity_delta === -40);
 record('mojito_sale_retry_is_idempotent', mojitoRetry.already_processed === true && Number((await ownerRead('inventory_items/syrup'))?.quantity) === 960 && Object.values(await ownerRead('sales') || {}).filter((row) => row.operation_key === mojitoSale.operation_key).length === 1);
 record('mojito_financial_inventory_cash_reconcile', mojitoSale.total_after_discount === 8000 && mojitoCash.reduce((n, row) => n + Number(row.amount || 0), 0) === 8000 && mojitoMoves.reduce((n, row) => n + Number(row.quantity_delta || 0), 0) === -40);
+// Recovery case: the claim exists but the acknowledgement was lost after the
+// sale write. The retry must reuse the claimed sale id and finish consumption
+// exactly once, even after the first consumption reduced available stock.
+await ownerSet('inventory_items/partialMilk/quantity', 100);
+await ownerSet('product_recipes/latte', { id: 'latte', product_id: 'latte', items: [{ inventory_item_id: 'partialMilk', quantity: 10, unit: 'piece' }] });
+const partialSaleKey = 'test-partial-sale-retry';
+await ownerSet(`sales_operations/${partialSaleKey}`, { id: partialSaleKey, status: 'pending', source_type: 'sale', operation_key: partialSaleKey, sale_id: 'sale-test-partial-sale-retry', fingerprint: JSON.stringify({ items: [{ product_id: 'latte', quantity: 1, unit_price: 1000 }], subtotal: 1000, discount: 0, total: 1000, payment_method: 'cash' }) });
+const partialSaleArgs = { product_id: 'latte', product_name: 'TEST Latte', quantity: 1, unit: 'piece', unit_price: 1000, payment_method: 'cash', date: '2026-09-12', month: '2026-09', operation_key: partialSaleKey };
+const partialSale = await api.create('sales', partialSaleArgs);
+const partialSaleRetry = await api.create('sales', partialSaleArgs);
+const partialMoves = Object.values(await ownerRead('inventory_movements') || {}).filter((row) => row.source_type === 'sale' && row.source_id === 'sale-test-partial-sale-retry' && row.type === 'recipe_consumption');
+const partialCash = Object.values(await ownerRead('cash_movements') || {}).filter((row) => row.source_type === 'sale' && row.source_id === 'sale-test-partial-sale-retry' && !row.deleted);
+record('partial_sale_recovery_uses_claimed_id', partialSale.id === 'sale-test-partial-sale-retry' && (await ownerRead(`sales_operations/${partialSaleKey}`))?.status === 'completed');
+record('partial_sale_retry_does_not_repeat', partialSaleRetry.already_processed === true && Number((await ownerRead('inventory_items/partialMilk'))?.quantity) === 90 && partialMoves.length === 1 && partialCash.length === 1);
 record('sale_consumption_edit_delete_guarded', await expectError(() => api.update('sales', mojitoSale.id, { ...mojitoSale, quantity: 3 }), /لا يمكن تعديل/) && await expectError(() => api.remove('sales', mojitoSale.id), /لا يمكن حذف/));
 record('new_sale_without_payment_blocked', await expectError(() => api.create('sales', { product_id: 'plain', product_name: 'TEST Plain', quantity: 1, unit: 'piece', unit_price: 1000, date: '2026-09-12', month: '2026-09' }), /اختر طريقة الدفع/));
 const cardSale = await api.create('sales', { product_id: 'plain-card', product_name: 'TEST Card', quantity: 1, unit: 'piece', unit_price: 2000, payment_method: 'card', date: '2026-09-12', month: '2026-09', operation_key: 'test-card-sale' });

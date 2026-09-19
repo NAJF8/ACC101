@@ -1163,7 +1163,17 @@ export const api = {
     // POS supplies its durable local id. Do not allocate a new push id before
     // claiming the operation: an accepted request may lose its response.
     const suppliedId = entity === 'sales' && (payload?.sale_id || payload?.id) ? cleanSaleKey(payload.sale_id || payload.id) : '';
-    const newRef = suppliedId ? ref(db, `${entity}/${suppliedId}`) : push(ref(db, entity));
+    // A retry may arrive without the original sale_id (for example, from an
+    // older POS client). Reuse the claimed sale id when available, otherwise
+    // derive one from the durable operation key instead of allocating a new
+    // push id that would falsely look like a conflicting sale.
+    let existingSaleOperation = null;
+    const suppliedOperationKey = entity === 'sales' && payload?.operation_key ? cleanSaleKey(payload.operation_key) : '';
+    if (entity === 'sales' && suppliedOperationKey) existingSaleOperation = (await get(ref(db, `sales_operations/${suppliedOperationKey}`))).val();
+    const stableSaleId = entity === 'sales' && suppliedOperationKey
+      ? (suppliedId || existingSaleOperation?.sale_id || `sale-${suppliedOperationKey}`)
+      : suppliedId;
+    const newRef = stableSaleId ? ref(db, `${entity}/${stableSaleId}`) : push(ref(db, entity));
     const now = new Date().toISOString();
     const cleanPayload = entity === 'purchases' ? normalizePurchasePayload(payload) : withoutUndefined(payload);
     if (financialEntities.has(entity)) await checkMonthOpen(getRecordMonth(cleanPayload));
@@ -1178,7 +1188,6 @@ export const api = {
       const discountAmount = discountType === 'percent' ? subtotal * discountValue / 100 : discountValue;
       if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitPrice) || unitPrice < 0 || discountAmount > subtotal) throw new Error('بيانات البيع أو الخصم غير صحيحة.');
       data.subtotal = subtotal; data.discount_amount = discountAmount; data.total_after_discount = subtotal - discountAmount;
-      await validateSaleRecipeAvailability(data);
       const sourceKey = String(data.operation_key || newRef.key).replace(/[.#$\[\]/]/g, '_');
       const fingerprint = saleFingerprint(data);
       const operationRef = ref(db, `sales_operations/${sourceKey}`);
@@ -1187,6 +1196,7 @@ export const api = {
       if (!claim.committed && existingOperation?.fingerprint && existingOperation.fingerprint !== fingerprint) throw Object.assign(new Error('تعارض في operation_key: المفتاح مستخدم لمحتوى بيع مختلف.'), { code: 'OPERATION_KEY_CONFLICT' });
       if (!claim.committed && existingOperation?.sale_id && existingOperation.sale_id !== newRef.key) throw Object.assign(new Error('تعارض في معرف البيع المحلي للعملية.'), { code: 'SALE_ID_CONFLICT' });
       if (!claim.committed && existingOperation?.status === 'completed') { const existingSale = existingOperation.sale_id ? await api.get(`sales/${existingOperation.sale_id}`).catch(() => null) : null; return { ...(existingSale || {}), already_processed: true, operation_key: data.operation_key || sourceKey }; }
+      await validateSaleRecipeAvailability(data);
       await set(newRef, data);
       try {
         const itemsToSell = data.items || [{ product_id: data.product_id, quantity: data.quantity }];

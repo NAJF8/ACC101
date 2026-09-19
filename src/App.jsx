@@ -1232,7 +1232,7 @@ function TransactionForm({ kind, initial, onDone, setToast, isMonthClosed = fals
       } : {
         ...form,
         product_id: form.product_id || form.item_id,
-        ...(!initial?.id ? { operation_key: saleOperationKey.current || (saleOperationKey.current = `ui-sale-${Date.now()}-${Math.random().toString(36).slice(2)}`) } : {}),
+        ...(!initial?.id ? (() => { const operationKey = saleOperationKey.current || (saleOperationKey.current = `ui-sale-${Date.now()}-${Math.random().toString(36).slice(2)}`); return { operation_key: operationKey, sale_id: `sale-${operationKey.replace(/[.#$\[\]/]/g, "_")}` }; })() : {}),
         item_name: itemName,
         product_name: itemName,
         category_name: categoryName,
@@ -1754,10 +1754,11 @@ function PayrollActionForm({ modal, selectedMonth, onDone, isMonthClosed = false
 function PayrollTimeline({ row, adjustments, payments, legacyAdvances, debts = [] }) { const name = String(row.employee_name || row.employee || ""); const events = [{ type: "base", label: "الراتب الأساسي", amount: Number(row.base_salary_snapshot || row.base_salary || 0), date: `${row.month}-01`, reason: "Snapshot الشهر" }, ...adjustments.filter((item) => item.payroll_id === row.id || (item.employee_id === row.employee_id && item.month === row.month)).map((item) => ({ type: item.type, label: actionLabel(item.type), amount: item.type === "deduction" ? -Number(item.amount || 0) : Number(item.amount || 0), date: item.date || item.created_at, reason: item.reason, user: item.created_by })), ...debts.filter((item) => item.employee_id === row.employee_id).map((item) => ({ type: "debt", label: item.status === "settled" ? "تسوية دين" : "دين", amount: -Number(item.amount || 0), date: item.date || item.created_at, reason: item.reason, user: item.created_by })), ...payments.filter((item) => item.payroll_id === row.id).map((item) => ({ type: "payment", label: "دفعة راتب", amount: Number(item.amount || 0), date: item.date || item.created_at, reason: item.notes, payment_method: item.payment_method, user: item.created_by })), ...legacyAdvances.filter((item) => !item.source_id && String(item.employee_id || item.employee || item.employee_name || "") === String(row.employee_id || name)).map((item) => ({ type: "advance", label: "سحب قديم / Legacy", amount: -Number(item.amount ?? item.advance ?? 0), date: item.date, reason: "Legacy employee withdrawal", user: item.created_by }))].sort((a, b) => String(b.date || "").localeCompare(String(a.date || ""))); return <div className="payroll-timeline">{events.map((event, index) => <div className={`timeline-item timeline-${event.type}`} key={`${event.type}-${event.date}-${event.amount}-${index}`}><span className="timeline-dot" /><div><strong>{event.label}</strong><b>{event.amount > 0 ? "+" : ""}{money(event.amount)}</b><small>{event.date || "—"}{event.reason ? ` · السبب: ${event.reason}` : ""}{event.payment_method ? ` · ${event.payment_method}` : ""}{event.user ? ` · المستخدم: ${event.user}` : ""}</small></div></div>)}</div>; }
 function Reports({ setToast, reportRange = { mode: "month", month: currentMonth() } }) {
   const [data, setData] = useState(null);
-  useEffect(() => { let mounted = true; api.reportRange(reportRange).then((next) => mounted && setData(next)).catch((e) => { if (mounted) setToast(e.message); }); return () => { mounted = false; }; }, [JSON.stringify(reportRange)]);
-  const label = reportRange.mode === "custom" ? `${reportRange.fromDate} — ${reportRange.toDate}` : monthLabel(reportRange.month);
+  const activeRange = reportRange && typeof reportRange === "object" ? reportRange : { mode: "month", month: currentMonth() };
+  useEffect(() => { let mounted = true; api.reportRange(activeRange).then((next) => mounted && setData(next)).catch((e) => { if (mounted) { setData({ range: activeRange, rows: {}, summary: {} }); setToast(e.message); } }); return () => { mounted = false; }; }, [activeRange.mode, activeRange.month, activeRange.fromDate, activeRange.toDate]);
+  const label = activeRange.mode === "custom" ? `${activeRange.fromDate} — ${activeRange.toDate}` : monthLabel(activeRange.month);
   const summary = data?.summary || {};
-  const exportReport = async (entity) => { try { await api.exportExcel(entity, reportRange); setToast("تم تنزيل ملف Excel مبسط"); } catch (e) { setToast(e.message); } };
+  const exportReport = async (entity) => { try { await api.exportExcel(entity, activeRange); setToast("تم تنزيل ملف Excel مبسط"); } catch (e) { setToast(e.message); } };
   return (
     <div className="screen-stack">
       <section className="panel report-period-panel"><div><p className="eyebrow">الفترة المحددة</p><h2>{label}</h2></div><span>من تاريخ البداية إلى تاريخ النهاية — الحدود شاملة</span></section>

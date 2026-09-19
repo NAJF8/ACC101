@@ -4,6 +4,7 @@ import { connectDatabaseEmulator } from 'firebase/database';
 
 const host = process.env.FIREBASE_EMULATOR_HOST || '127.0.0.1';
 if (!['127.0.0.1', 'localhost'].includes(host)) throw new Error('Refusing non-local emulator host.');
+process.env.FIREBASE_EMULATOR_HOST = host;
 const { api } = await import('../src/services/api.js');
 const { auth, db } = await import('../src/services/firebase.js');
 connectAuthEmulator(auth, `http://${host}:9099`, { disableWarnings: true });
