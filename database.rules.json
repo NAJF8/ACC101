@@ -33,14 +33,14 @@
       ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || root.child('users').child(auth.uid).child('role').val() == 'supervisor' || root.child('users').child(auth.uid).child('permissions').child('purchases').child('view').val() == true)",
       ".write": "auth != null && false",
       "$id": {
-        ".write": "auth != null && root.child('monthly_periods').child(newData.child('month').val() != null ? newData.child('month').val() : data.child('month').val()).child('status').val() != 'closed' && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || (newData.exists() && !data.exists() && root.child('users').child(auth.uid).child('permissions').child('purchases').child('create').val() == true) || (data.exists() && newData.exists() && root.child('users').child(auth.uid).child('permissions').child('purchases').child('edit').val() == true) || (!newData.exists() && data.exists() && root.child('users').child(auth.uid).child('permissions').child('purchases').child('delete').val() == true))"
+        ".write": "auth != null && (data.child('month').val() == null || root.child('monthly_periods').child(data.child('month').val()).child('status').val() != 'closed') && (newData.child('month').val() == null || root.child('monthly_periods').child(newData.child('month').val()).child('status').val() != 'closed') && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || (newData.exists() && !data.exists() && root.child('users').child(auth.uid).child('permissions').child('purchases').child('create').val() == true) || (data.exists() && newData.exists() && root.child('users').child(auth.uid).child('permissions').child('purchases').child('edit').val() == true) || (!newData.exists() && data.exists() && root.child('users').child(auth.uid).child('permissions').child('purchases').child('delete').val() == true))"
       }
     },
     "expenses": {
       ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || root.child('users').child(auth.uid).child('role').val() == 'supervisor' || root.child('users').child(auth.uid).child('permissions').child('expenses').child('view').val() == true)",
       ".write": "auth != null && false",
       "$id": {
-        ".write": "auth != null && root.child('monthly_periods').child(newData.child('month').val() != null ? newData.child('month').val() : data.child('month').val()).child('status').val() != 'closed' && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || (newData.exists() && !data.exists() && root.child('users').child(auth.uid).child('permissions').child('expenses').child('create').val() == true) || (data.exists() && newData.exists() && (root.child('users').child(auth.uid).child('permissions').child('expenses').child('edit').val() == true || root.child('users').child(auth.uid).child('permissions').child('debts').child('settle').val() == true)) || (!newData.exists() && data.exists() && root.child('users').child(auth.uid).child('permissions').child('expenses').child('delete').val() == true))"
+        ".write": "auth != null && (data.child('month').val() == null || root.child('monthly_periods').child(data.child('month').val()).child('status').val() != 'closed') && (newData.child('month').val() == null || root.child('monthly_periods').child(newData.child('month').val()).child('status').val() != 'closed') && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || (newData.exists() && !data.exists() && root.child('users').child(auth.uid).child('permissions').child('expenses').child('create').val() == true) || (data.exists() && newData.exists() && (root.child('users').child(auth.uid).child('permissions').child('expenses').child('edit').val() == true || root.child('users').child(auth.uid).child('permissions').child('debts').child('settle').val() == true)) || (!newData.exists() && data.exists() && root.child('users').child(auth.uid).child('permissions').child('expenses').child('delete').val() == true))"
       }
     },
     "sales": {
@@ -164,7 +164,23 @@
       ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || root.child('users').child(auth.uid).child('permissions').child('assets').child('view').val() == true)",
       ".write": "auth != null && false",
       "$id": {
-        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || (newData.exists() && !data.exists() && root.child('users').child(auth.uid).child('permissions').child('assets').child('create').val() == true) || (data.exists() && newData.exists() && (root.child('users').child(auth.uid).child('permissions').child('assets').child('edit').val() == true || root.child('users').child(auth.uid).child('permissions').child('assets').child('disable').val() == true)) || (!newData.exists() && data.exists() && root.child('users').child(auth.uid).child('permissions').child('assets').child('delete').val() == true))"
+        ".write": "auth != null && (data.child('month').val() == null || root.child('monthly_periods').child(data.child('month').val()).child('status').val() != 'closed') && (newData.child('month').val() == null || root.child('monthly_periods').child(newData.child('month').val()).child('status').val() != 'closed') && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || (newData.exists() && !data.exists() && root.child('users').child(auth.uid).child('permissions').child('assets').child('create').val() == true) || (data.exists() && newData.exists() && (root.child('users').child(auth.uid).child('permissions').child('assets').child('edit').val() == true || root.child('users').child(auth.uid).child('permissions').child('assets').child('disable').val() == true)) || (!newData.exists() && data.exists() && root.child('users').child(auth.uid).child('permissions').child('assets').child('delete').val() == true))"
+      }
+    },
+    "asset_categories": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || root.child('users').child(auth.uid).child('permissions').child('assets').child('view').val() == true)",
+      ".write": "auth != null && false",
+      "$id": {
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || root.child('users').child(auth.uid).child('permissions').child('assets').child('create').val() == true || root.child('users').child(auth.uid).child('permissions').child('assets').child('edit').val() == true)",
+        ".validate": "newData.hasChildren(['id','name','active','created_at','created_by']) && newData.child('id').isString() && newData.child('name').isString() && newData.child('name').val().length > 0 && newData.child('active').isBoolean()"
+      }
+    },
+    "asset_subcategories": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || root.child('users').child(auth.uid).child('permissions').child('assets').child('view').val() == true)",
+      ".write": "auth != null && false",
+      "$id": {
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || root.child('users').child(auth.uid).child('permissions').child('assets').child('create').val() == true || root.child('users').child(auth.uid).child('permissions').child('assets').child('edit').val() == true)",
+        ".validate": "newData.hasChildren(['id','parent_id','name','active','created_at','created_by']) && newData.child('id').isString() && newData.child('parent_id').isString() && newData.child('name').isString() && newData.child('name').val().length > 0 && newData.child('active').isBoolean() && root.child('asset_categories').child(newData.child('parent_id').val()).exists()"
       }
     },
     "imports": {
@@ -296,12 +312,26 @@
     "partners": {
       ".read": "auth != null && root.child('users').child(auth.uid).child('role').val() == 'super_admin'",
       ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() == 'super_admin'",
-      "$id": { ".validate": "newData.hasChildren(['id','name','agreed_capital','created_at','created_by']) && newData.child('id').isString() && newData.child('name').isString() && newData.child('agreed_capital').isNumber() && newData.child('agreed_capital').val() >= 0" }
+      "$id": { ".validate": "newData.hasChildren(['id','name','created_at','created_by']) && newData.child('id').isString() && newData.child('name').isString() && newData.child('name').val().length > 0 && (!newData.child('agreed_capital').exists() || (newData.child('agreed_capital').isNumber() && newData.child('agreed_capital').val() >= 0)) && (!newData.child('agreed_capital_specified').exists() || newData.child('agreed_capital_specified').isBoolean())" }
     },
     "partner_payments": {
       ".read": "auth != null && root.child('users').child(auth.uid).child('role').val() == 'super_admin'",
       ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() == 'super_admin'",
-      "$id": { ".validate": "newData.hasChildren(['id','partner_id','amount','date','payment_method','created_at','created_by']) && newData.child('amount').isNumber() && newData.child('amount').val() > 0 && root.child('partners').child(newData.child('partner_id').val()).exists()" }
+      "$id": { ".validate": "newData.hasChildren(['id','partner_id','amount','date','payment_method','created_at','created_by']) && newData.child('amount').isNumber() && newData.child('amount').val() > 0 && newData.child('date').isString() && root.child('partners').child(newData.child('partner_id').val()).exists() && root.child('monthly_periods').child(newData.child('month').val()).child('status').val() != 'closed'" }
+    },
+    "partner_operations": {
+      ".read": "auth != null && root.child('users').child(auth.uid).child('role').val() == 'super_admin'",
+      ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() == 'super_admin'",
+      "$id": { ".validate": "newData.hasChildren(['id','operation_key','partner_id','operation_type','amount','date','month','created_at','created_by','status']) && newData.child('amount').isNumber() && newData.child('amount').val() > 0 && newData.child('operation_key').isString() && newData.child('partner_id').isString() && root.child('partners').child(newData.child('partner_id').val()).exists() && root.child('monthly_periods').child(newData.child('month').val()).child('status').val() != 'closed'" }
+    },
+    "partner_operation_claims": {
+      ".read": "auth != null && root.child('users').child(auth.uid).child('role').val() == 'super_admin'",
+      "$id": { ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() == 'super_admin'", ".validate": "newData.hasChildren(['operation_key','status','created_at','created_by']) && newData.child('operation_key').isString()" }
+    },
+    "partner_settlements": {
+      ".read": "auth != null && root.child('users').child(auth.uid).child('role').val() == 'super_admin'",
+      ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() == 'super_admin'",
+      "$id": { ".validate": "newData.hasChildren(['id','partner_id','amount','date','month','payment_method','created_at','created_by']) && newData.child('amount').isNumber() && newData.child('amount').val() > 0 && root.child('partners').child(newData.child('partner_id').val()).exists() && root.child('monthly_periods').child(newData.child('month').val()).child('status').val() != 'closed'" }
     },
     "establishment_categories": {
       ".read": "auth != null && root.child('users').child(auth.uid).child('role').val() == 'super_admin'",
@@ -309,8 +339,11 @@
     },
     "establishment_costs": {
       ".read": "auth != null && root.child('users').child(auth.uid).child('role').val() == 'super_admin'",
-      ".write": "auth != null && root.child('users').child(auth.uid).child('role').val() == 'super_admin'",
-      "$id": { ".validate": "newData.hasChildren(['id','amount','paid_amount','remaining_amount','date','category_name','created_at','created_by']) && newData.child('amount').isNumber() && newData.child('amount').val() > 0 && newData.child('paid_amount').isNumber() && newData.child('paid_amount').val() >= 0 && newData.child('remaining_amount').isNumber() && newData.child('remaining_amount').val() == newData.child('amount').val() - newData.child('paid_amount').val()" }
+      ".write": "auth != null && false",
+      "$id": {
+        ".write": "auth != null && (data.child('month').val() == null || root.child('monthly_periods').child(data.child('month').val()).child('status').val() != 'closed') && (newData.child('month').val() == null || root.child('monthly_periods').child(newData.child('month').val()).child('status').val() != 'closed') && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || (newData.child('source_type').val() == 'historical_import' && root.child('users').child(auth.uid).child('role').val() == 'manager'))",
+        ".validate": "newData.hasChildren(['id','amount','paid_amount','remaining_amount','date','category_name','created_at','created_by']) && newData.child('amount').isNumber() && newData.child('amount').val() > 0 && newData.child('paid_amount').isNumber() && newData.child('paid_amount').val() >= 0 && newData.child('remaining_amount').isNumber() && newData.child('remaining_amount').val() == newData.child('amount').val() - newData.child('paid_amount').val()"
+      }
     },
     "audit": {
       ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('permissions').child('audit').child('view').val() == true)",
@@ -318,6 +351,14 @@
       "$id": {
         ".write": "auth != null && newData.exists() && !data.exists() && (newData.child('actor_uid').val() == auth.uid || newData.child('created_by').val() == auth.uid)",
         ".validate": "newData.child('actor_uid').val() == auth.uid || newData.child('created_by').val() == auth.uid"
+      }
+    },
+    "historical_imports": {
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || root.child('users').child(auth.uid).child('permissions').child('excel').child('import').val() == true)",
+      ".write": "auth != null && false",
+      "$id": {
+        ".write": "auth != null && (data.child('month').val() == null || root.child('monthly_periods').child(data.child('month').val()).child('status').val() != 'closed') && (newData.child('month').val() == null || root.child('monthly_periods').child(newData.child('month').val()).child('status').val() != 'closed') && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || root.child('users').child(auth.uid).child('permissions').child('excel').child('import').val() == true)",
+        ".validate": "newData.hasChildren(['id','import_key','source_filename','source_sheet','source_row','name','amount','accounting_class','review_required','duplicate_status','status','created_at','created_by']) && newData.child('id').isString() && newData.child('import_key').isString() && newData.child('source_filename').isString() && newData.child('source_sheet').isString() && newData.child('source_row').isNumber() && newData.child('name').isString() && newData.child('amount').isNumber() && newData.child('review_required').isBoolean() && newData.child('duplicate_status').isString()"
       }
     }
   }

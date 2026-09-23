@@ -24,7 +24,12 @@
     "test:payment-review": "node scripts/payment-review-regression.mjs",
     "test:shift": "node scripts/shift-regression.mjs",
     "test:owner-cash": "node scripts/owner-cash-regression.mjs",
+    "test:historical-import": "node scripts/historical-import-emulator-regression.mjs",
+    "test:historical-asset-classification": "node scripts/historical-asset-classification-emulator-regression.mjs",
+    "test:historical-classification-batch": "node scripts/historical-classification-batch-emulator-regression.mjs",
+    "test:historical-management": "node scripts/historical-import-management-emulator-regression.mjs",
     "test:partners-establishment-reset": "node scripts/partners-establishment-reset-regression.mjs",
+    "test:partner-operations": "node scripts/partner-operations-emulator-regression.mjs",
     "check": "node scripts/check-permissions.mjs && vite build",
     "build:firebase": "vite build --mode firebase",
     "build:github": "vite build --mode github && node -e \"require('fs').copyFileSync('dist/index.html', 'dist/404.html')\""

@@ -29,6 +29,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Trash2,
+  Utensils,
   UserRound,
   Users,
   WalletCards,
@@ -37,6 +38,7 @@ import {
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { api } from "./services/api.js";
+import { parseHistoricalWorkbook, markPotentialDuplicates, filterHistoricalRows, summarizeHistoricalRows, historicalMonthOptions, isClassificationReview } from "./services/historical-import.js";
 import {
   permissionGroups,
   permissionGroupLabels,
@@ -51,6 +53,7 @@ import "./reference.css";
 import { aggregateFinancialTimeline, buildPayrollRows, buildPeriodComparison, currentMonth, getRecordMonth, monthLabel, nextMonth, normalizeDateRange, previousMonth, recordsForMonth } from "./services/financial.js";
 import { buildInventorySalesAnalytics, filterExpiry, expiryStatus, inventoryBaseUnitCost, inventoryValue, isAmbiguousInventoryUnit, locationBalances, lowStockStatus, movementConsumptionBySource, normalizeBarcode, sortHistory, sortLowStock, packageEquivalent, packageSize } from "./services/inventory.js";
 import { cameraMessages, createBarcodeCameraController } from "./services/barcodeCamera.js";
+import { assetCategoryIdFromRecord } from "./services/audit-center.js";
 
 const money = (v) =>
   `${Number(v || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })} د.ع`;
@@ -69,6 +72,93 @@ const userFacingError = (error, fallback = "تعذر إتمام العملية."
   if (!message || /permission_denied|PERMISSION_DENIED|auth\//i.test(message)) return "لا تملك صلاحية تنفيذ هذه العملية.";
   if (/network|failed to fetch|fetch/i.test(message)) return "تعذر الاتصال بالخدمة المحلية. حاول مرة أخرى.";
   return message || fallback;
+};
+
+const ASSET_IMPORT_CATEGORIES = [
+  ["أجهزة ومعدات القهوة", /قهوة|كهوة|مطحنة|ماكينة|اليات|اجهزة قهوة/i, "fixed_asset"],
+  ["أجهزة ومعدات المطبخ", /مايكرو|ثلاج|براد|كيك|كابسه|خلاطات|مغاسل|خلاط/i, "fixed_asset"],
+  ["المولدات والطاقة", /مولد|كاز|واير|كيبل/i, "fixed_asset"],
+  ["التبريد والتكييف", /سبلت|تبريد|تكييف|فلاتر مياه|قطعه خارجيه/i, "fixed_asset"],
+  ["الأثاث والطاولات والكراسي", /كراسي|طاولات|ميز|قاصه|كاربت|كاش للدخل/i, "fixed_asset"],
+  ["الكاونترات والديكور", /كاونتر|ديكور|جام|ارضية|سيراميك|اصباغ|صبغ|نباتات|مرايا|انشائيه|بوردكس|سنادين/i, "fixed_asset"],
+  ["الكهرباء والإنارة", /كهربائيات|كهرباء|سبوت|بورد كهرباء|اضافات/i, "fixed_asset"],
+  ["الكاميرات والإنترنت", /كامرات|كاميرا|انترنت|مواد انترنت|واي.?فاي|بث/i, "fixed_asset"],
+  ["أجهزة الكاشير والحاسبات", /حاسبة|كاشير|طابعه|برنامج|استنساخ|سويج/i, "fixed_asset"],
+  ["الأدوات ومستلزمات التشغيل", /ادوات|أكواب|اكواب|منزلية|منزليه|منظفات|عطر|معطر|جكات|يدات|صونده|بتموس|مياه زجاجية|فراش/i, "supplies"],
+  ["المواد الأولية", /حليب|قهوة|سيرب|سيربات|سكر|شكر|فواكه|سمك|كيك|مواد قهوة|ماتجا/i, "supplies"],
+  ["الإيجار ومصاريف الموقع", /ايجار|اجار|إيجار|نقل|سفريات|توصيل|ضيافة|اكل|غداء|عشاء/i, "setup_cost"],
+  ["أجور العمال والتجهيز", /عمال|اجور|أجور|سيد قاسم|ابو يوسف|مناف|مروان|تصميم|تنصيب|تنظيم|تصعيد/i, "setup_cost"],
+  ["التسويق والافتتاح", /اعلان|إعلان|ترويج|تسوي/i, "setup_cost"],
+];
+const ASSET_CATEGORY_CATALOG = [
+  ["coffee_equipment", "أجهزة القهوة", Coffee],
+  ["electrical", "الكهربائيات", Zap],
+  ["kitchen_equipment", "معدات المطبخ", Utensils],
+  ["counters_decor", "الكاونترات والديكور", Building2],
+  ["construction", "الأرضيات والإنشائيات", Layers],
+  ["cooling", "التبريد والتكييف", SlidersHorizontal],
+  ["furniture", "الأثاث", Boxes],
+  ["cashier_computers", "أجهزة الكاشير والحاسبات", BarChart3],
+  ["other", "تجهيزات أخرى", Package],
+];
+const normalizeCategoryName = (value) => normalizeAssetText(value).replace(/[إأآ]/g, "ا");
+const assetCategoryIdFromLegacy = (row = {}) => {
+  if (row.asset_category_id) return String(row.asset_category_id);
+  const value = normalizeCategoryName(row.category || row.proposed_category || "");
+  if (/كهرب|واير|كيبل|اسلاك|قاطع|تمديد/.test(value)) return "electrical";
+  if (/قهو|اسبريسو|مطحنة|ماكينة/.test(value)) return "coffee_equipment";
+  if (/مطبخ|ثلاج|فرن|خلاط/.test(value)) return "kitchen_equipment";
+  if (/كاونتر|ديكور/.test(value)) return "counters_decor";
+  if (/ارض|انشائ|بناء/.test(value)) return "construction";
+  if (/تبريد|تكييف|سبلت/.test(value)) return "cooling";
+  if (/اثاث|طاول|كراسي/.test(value)) return "furniture";
+  if (/كاشير|حاسب|حاسبة|كمبيوتر/.test(value)) return "cashier_computers";
+  return "other";
+};
+const assetCategoryName = (id) => ASSET_CATEGORY_CATALOG.find(([key]) => key === id)?.[1] || "تجهيزات أخرى";
+const classifyAssetImportRow = (name = "", notes = "") => {
+  const text = `${name} ${notes}`.trim();
+  const match = ASSET_IMPORT_CATEGORIES.find(([, pattern]) => pattern.test(text));
+  return match ? { category: match[0], accounting_class: match[2] } : { category: "مصاريف تأسيس أخرى", accounting_class: "review" };
+};
+const assetAccountingLabel = (value) => ({ fixed_asset: "أصل ثابت", setup_cost: "تكلفة تأسيس", supplies: "مواد ومستلزمات أولية", review: "يحتاج مراجعة" }[value] || "يحتاج مراجعة");
+const normalizeAssetText = (value) => String(value || "").trim().toLowerCase().replace(/[ًٌٍَُِّْـ]/g, "").replace(/[إأآ]/g, "ا").replace(/ى/g, "ي").replace(/\s+/g, " ");
+const parseAssetWorkbook = (workbook, filename = "101caffee.xlsx") => {
+  const rows = [];
+  workbook.SheetNames.forEach((sheetName) => {
+    const sheet = workbook.Sheets[sheetName];
+    const startRow = sheet["!ref"] ? XLSX.utils.decode_range(sheet["!ref"]).s.r : 0;
+    const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, raw: true });
+    matrix.forEach((cells, index) => {
+      const name = cells[1];
+      if (!name || String(name).trim() === "المادة") return;
+      const notes = [cells[5], ...cells.slice(6).filter((value) => value !== null && value !== "")].filter(Boolean).join(" · ");
+      const quantity = cells[2] === null || cells[2] === "" ? null : Number(cells[2]);
+      const unitPrice = cells[3] === null || cells[3] === "" ? null : Number(cells[3]);
+      const total = cells[4] === null || cells[4] === "" ? null : Number(cells[4]);
+      const recalcTotal = Number.isFinite(quantity) && Number.isFinite(unitPrice) ? quantity * unitPrice : null;
+      const classification = classifyAssetImportRow(name, notes);
+      rows.push({
+        import_key: `${filename}|${sheetName}|${startRow + index + 1}`,
+        source_filename: filename,
+        source_sheet: sheetName,
+        source_row: startRow + index + 1,
+        serial: cells[0] ?? null,
+        name: String(name).trim(),
+        quantity: Number.isFinite(quantity) ? quantity : null,
+        unit: null,
+        unit_price: Number.isFinite(unitPrice) ? unitPrice : null,
+        total: Number.isFinite(total) ? total : null,
+        notes,
+        ...classification,
+        review_required: classification.accounting_class === "review",
+        owner_approval_note: startRow + index + 1 === 36 ? "اعتمد المالك الإجمالي المكتوب في E36 رغم اختلافه عن حاصل ضرب الكمية بالسعر؛ لا يُسجل الفرق كبند مستقل." : "",
+        total_mismatch: Number.isFinite(total) && Number.isFinite(recalcTotal) && Math.abs(total - recalcTotal) > 0.001,
+        recalculated_total: recalcTotal,
+      });
+    });
+  });
+  return rows;
 };
 const localQa = import.meta.env.DEV && typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname);
 const referencePrefix = { sales: "SALE", purchases: "PUR", expenses: "EXP", cash_movements: "CASH", debts: "DEBT", debt_payments: "DEBT-PAY", payroll_payments: "PAY", cashier_shifts: "SHIFT" };
@@ -93,10 +183,13 @@ const nav = [
   ["categories", "إدارة الأقسام", SlidersHorizontal],
   ["inventory", "المخزون", Boxes],
   ["expenses", "المصروفات", Receipt],
+  ["monthly_expenses", "مصاريف الشهر", CalendarDays],
   ["other_income", "الإيرادات الأخرى", Receipt],
   ["employees", "ملفات الموظفين", Users],
   ["payroll", "رواتب الموظفين", Users],
   ["assets", "الأصول", Building2],
+  ["audit_center", "مركز التدقيق والمطابقة", ShieldCheck],
+  ["historical_imports", "الاستيراد التاريخي", FileSpreadsheet],
   ["suppliers", "التجار والشركات", Package],
   ["debts", "الديون والآجل", WalletCards],
   ["cash", "حركة الصندوق", WalletCards],
@@ -120,10 +213,13 @@ const pagePermissions = {
   categories: "categories.view",
   inventory: "inventory.view",
   expenses: "expenses.view",
+  monthly_expenses: "expenses.view",
   other_income: "other_income.view",
   employees: "employees.view",
   payroll: "payroll.view",
   assets: "assets.view",
+  audit_center: "audit.view",
+  historical_imports: "excel.import",
   suppliers: "suppliers.view",
   debts: "debts.view",
   cash: "cash_movements.view",
@@ -142,7 +238,7 @@ const pageCreatePermissions = {
   payroll: "payroll.create", assets: "assets.create", suppliers: "suppliers.create",
   debts: "debts.create",
   employees: "employees.create",
-  cash: "cash_movements.create", imports: "excel.import", users: "users.create", settings: "settings.edit",
+  cash: "cash_movements.create", users: "users.create", settings: "settings.edit",
   partners: "partners.manage", establishment: "establishment.manage", system_reset: "system.reset",
 };
 const pageIsAllowed = (session, pageId) => pageId === "dashboard" || hasPermission(session, pagePermissions[pageId]);
@@ -422,19 +518,86 @@ function Login({ onLogin }) {
 }
 
 function PartnersPage({ setToast }) {
-  const [data, setData] = useState({ partners: [], payments: [], agreed: 0, paid: 0, remaining: 0 });
+  const [data, setData] = useState({ partners: [], payments: [], operations: [], settlements: [], agreed: 0, paid: 0, remaining: 0, documentedCapital: 0, totalOwed: 0 });
   const [partner, setPartner] = useState({ name: '', agreed_capital: '', notes: '' });
-  const [payment, setPayment] = useState({ partner_id: '', amount: '', date: today(), payment_method: 'cash', notes: '' });
+  const [operation, setOperation] = useState({ partner_id: '', operation_type: 'personal_purchase', amount: '', date: today(), item_name: '', description: '', accounting_class: 'fixed_asset', asset_category_id: 'other', asset_category_name: 'تجهيزات أخرى', asset_subcategory_id: '', asset_subcategory_name: '', subcategory: '', funding_mode: '', payment_method: 'cash', cash_received: false, notes: '' });
+  const [selectedPartner, setSelectedPartner] = useState('');
+  const [query, setQuery] = useState('');
+  const [showAddPartner, setShowAddPartner] = useState(false);
+  const [showAddOp, setShowAddOp] = useState(false);
+  const [partnerAssetCategories, setPartnerAssetCategories] = useState(ASSET_CATEGORY_CATALOG.map(([id, name]) => ({ id, name })));
+  const [partnerAssetSubcategories, setPartnerAssetSubcategories] = useState([]);
+  useNewAction('partners', () => setShowAddOp(true));
   const load = () => api.listPartnerCapital().then(setData).catch((e) => setToast(userFacingError(e)));
   useEffect(() => { load(); }, []);
-  const savePartner = async (event) => { event.preventDefault(); try { await api.savePartner(partner); setPartner({ name: '', agreed_capital: '', notes: '' }); await load(); setToast('تم حفظ بيانات الشريك'); } catch (e) { setToast(userFacingError(e)); } };
-  const addPayment = async (event) => { event.preventDefault(); try { await api.addPartnerPayment(payment); setPayment({ ...payment, amount: '', notes: '' }); await load(); setToast('تمت إضافة دفعة رأس المال دون استبدال السابق'); } catch (e) { setToast(userFacingError(e)); } };
+  useEffect(() => { Promise.all([api.listAssetCategories().catch(() => []), api.listAssetSubcategories().catch(() => [])]).then(([custom, children]) => { const merged = [...ASSET_CATEGORY_CATALOG.map(([id, name]) => ({ id, name }))]; custom.forEach((row) => { const index = merged.findIndex((item) => item.id === row.id); if (index >= 0) merged[index] = { ...merged[index], ...row }; else merged.push(row); }); setPartnerAssetCategories(merged); setPartnerAssetSubcategories(children); }).catch(() => {}); }, []);
+  const savePartner = async (event) => { event.preventDefault(); try { await api.savePartner(partner); setPartner({ name: '', agreed_capital: '', notes: '' }); setShowAddPartner(false); await load(); setToast('تم حفظ بيانات الشريك'); } catch (e) { setToast(userFacingError(e)); } };
+  const submitOperation = async (event) => { event.preventDefault(); try { await api.createPartnerOperation({ ...operation, operation_key: typeof crypto?.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}` }); setOperation({ ...operation, amount: '', item_name: '', description: '', notes: '' }); setShowAddOp(false); await load(); setToast('تم حفظ العملية وروابطها المالية فعليًا'); } catch (e) { setToast(userFacingError(e)); } };
+  const filteredPartners = data.partners.filter((row) => !query || String(row.name || '').toLowerCase().includes(query.toLowerCase()));
+  const selected = data.partners.find((row) => row.id === selectedPartner);
+  const selectedPartnerIds = selected?.partner_ids || (selectedPartner ? [selectedPartner] : []);
+  const partnerOperations = data.operations.filter((row) => selectedPartnerIds.includes(row.partner_id)).concat(data.settlements.filter((row) => selectedPartnerIds.includes(row.partner_id)).map((row) => ({ ...row, operation_type: 'partner_settlement', description: 'تسديد مستحق' })));
+  const updateOperation = (key, value) => setOperation((current) => ({ ...current, [key]: value }));
+
   return <div className="screen-stack">
-    <Panel title="الشركاء ورأس المال" action="إدارة مستقلة — السوبر أدمن فقط"><div className="report-summary-grid">{[['إجمالي رأس المال المتفق عليه', data.agreed], ['المستلم فعلياً', data.paid], ['المتبقي', data.remaining]].map(([label, value]) => <div className="report-summary-card" key={label}><span>{label}</span><strong>{money(value)}</strong></div>)}</div>
-      <form className="smart-form" onSubmit={savePartner}><label><span>اسم الشريك</span><input required value={partner.name} onChange={(e) => setPartner({ ...partner, name: e.target.value })} /></label><label><span>رأس المال المتفق عليه</span><input required type="number" min="0" value={partner.agreed_capital} onChange={(e) => setPartner({ ...partner, agreed_capital: e.target.value })} /></label><label><span>ملاحظات</span><input value={partner.notes} onChange={(e) => setPartner({ ...partner, notes: e.target.value })} /></label><button className="primary">إضافة / حفظ الشريك</button></form>
-      <DataTable rows={data.partners} columns={[["name", "الشريك"],["agreed_capital", "المتفق عليه", money],["paid_capital", "المدفوع", money],["remaining_capital", "المتبقي", money]]} />
+    {/* Global KPI Row */}
+    <div className="report-summary-grid" style={{gridTemplateColumns:'repeat(4,1fr)'}}>
+      {[['رأس المال الموثق', data.documentedCapital], ['المستحق الإجمالي للشركاء', data.totalOwed], ['رأس المال المتفق عليه', data.agreed], ['عدد الشركاء', data.partners.length]].map(([label, value]) => <div className="report-summary-card" key={label}><span>{label}</span><strong>{typeof value === 'number' && label.includes('عدد') ? value : money(value)}</strong></div>)}
+    </div>
+
+    <Panel title="الشركاء" action="اختر شريكاً لعرض تفاصيله">
+      {/* Toolbar */}
+      <div className="toolbar">
+        <div className="table-search"><Search size={17} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="بحث عن شريك..." /></div>
+        <button className="secondary" onClick={() => setShowAddPartner(!showAddPartner)}><Plus size={17} /> {showAddPartner ? 'إلغاء' : 'إضافة شريك'}</button>
+        <button className="primary" onClick={() => setShowAddOp(!showAddOp)}><Plus size={17} /> {showAddOp ? 'إلغاء' : 'إضافة عملية'}</button>
+      </div>
+
+      {/* Partner selection cards */}
+      <div className="partner-select-grid">
+        {filteredPartners.map((row) => <button type="button" className={`partner-card-btn ${selectedPartner === row.id ? 'active' : ''}`} key={row.id} onClick={() => setSelectedPartner(selectedPartner === row.id ? '' : row.id)}>
+          <strong>{row.name}</strong>
+          <span>{money(row.paid_capital)} موثق</span>
+          <span style={{fontSize:'10px',color:'#9a6418',marginTop:'3px'}}>مستحق: {money(row.remaining_owed)}</span>
+        </button>)}
+      </div>
+
+      {/* Add partner form */}
+      {showAddPartner && <div style={{borderTop:'1px solid var(--border)',paddingTop:'16px',marginTop:'4px'}}>
+        <h3 style={{margin:'0 0 14px',fontSize:'15px'}}>إضافة / تعديل شريك</h3>
+        <form className="smart-form" onSubmit={savePartner}>
+          <label><span>اسم الشريك</span><input required value={partner.name} onChange={(e) => setPartner({ ...partner, name: e.target.value })} /></label>
+          <label><span>رأس المال المتفق عليه</span><input type="number" min="0" placeholder="غير محدد حاليًا" value={partner.agreed_capital} onChange={(e) => setPartner({ ...partner, agreed_capital: e.target.value })} /></label>
+          <label className="wide"><span>ملاحظات</span><input value={partner.notes} onChange={(e) => setPartner({ ...partner, notes: e.target.value })} /></label>
+          <button className="primary wide">حفظ الشريك</button>
+        </form>
+      </div>}
+
+      {/* Add operation form */}
+      {showAddOp && <div style={{borderTop:'1px solid var(--border)',paddingTop:'16px',marginTop:'4px'}}>
+        <h3 style={{margin:'0 0 14px',fontSize:'15px'}}>إضافة عملية للشريك</h3>
+        <form className="smart-form" onSubmit={submitOperation}>
+          <SelectField label="الشريك" value={operation.partner_id} onChange={(v) => updateOperation('partner_id', v)}><option value="">اختر الشريك</option>{data.partners.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}</SelectField>
+          <SelectField label="نوع العملية" value={operation.operation_type} onChange={(v) => updateOperation('operation_type', v)}><option value="personal_purchase">شراء شخصي للكوفي</option><option value="capital_contribution">مساهمة رأس مال نقدية</option><option value="partner_loan">قرض نقدي من الشريك</option><option value="partner_settlement">تسديد مستحق</option><option value="partner_withdrawal">مسحوبات الشريك</option></SelectField>
+          <label><span>المبلغ</span><input required type="number" min="0.01" value={operation.amount} onChange={(e) => updateOperation('amount', e.target.value)} /></label>
+          <label><span>التاريخ</span><input required type="date" value={operation.date} onChange={(e) => updateOperation('date', e.target.value)} /></label>
+          {operation.operation_type === 'personal_purchase' && <><label><span>اسم الغرض</span><input required value={operation.item_name} onChange={(e) => updateOperation('item_name', e.target.value)} /></label><SelectField label="التصنيف المحاسبي" value={operation.accounting_class} onChange={(v) => updateOperation('accounting_class', v)}><option value="fixed_asset">أصل ثابت</option><option value="supplies">مشتريات أو مخزون</option><option value="expense">مصروف</option><option value="setup_cost">تكاليف تأسيس</option></SelectField>{operation.accounting_class === 'fixed_asset' && <><SelectField label="قسم الأصل" value={operation.asset_category_id || 'other'} onChange={(v) => { const category = partnerAssetCategories.find((row) => row.id === v); setOperation((current) => ({ ...current, asset_category_id: v, asset_category_name: category?.name || assetCategoryName(v), asset_subcategory_id: '' })); }}><option value="">اختر القسم</option>{partnerAssetCategories.filter((row) => row && row.active !== false).map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}</SelectField><SelectField label="القسم الفرعي — اختياري" value={operation.asset_subcategory_id || ''} onChange={(v) => updateOperation('asset_subcategory_id', v)}><option value="">بدون قسم فرعي</option>{partnerAssetSubcategories.filter((row) => row.parent_id === (operation.asset_category_id || 'other') && row.active !== false).map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}</SelectField></>}<label><span>الوصف</span><input value={operation.description} onChange={(e) => updateOperation('description', e.target.value)} /></label><SelectField label="معاملة التمويل (إلزامية)" value={operation.funding_mode} onChange={(v) => updateOperation('funding_mode', v)}><option value="">اختر المعاملة</option><option value="capital">زيادة رأس مال</option><option value="payable">مبلغ مستحق للشريك</option></SelectField></>}
+          {operation.operation_type === 'partner_settlement' && <label><span>معرّف العملية الأصلية إن وجد</span><input value={operation.original_operation_id || ''} onChange={(e) => updateOperation('original_operation_id', e.target.value)} /></label>}
+          <SelectField label="طريقة الدفع / الاستلام" value={operation.payment_method} onChange={(v) => updateOperation('payment_method', v)}><option value="cash">نقدي</option><option value="transfer">تحويل</option><option value="electronic">إلكتروني</option></SelectField>
+          {['capital_contribution', 'partner_loan'].includes(operation.operation_type) && <label className="check-label"><input type="checkbox" checked={operation.cash_received} onChange={(e) => updateOperation('cash_received', e.target.checked)} /><span>تم استلام النقد فعليًا</span></label>}
+          <label className="wide"><span>ملاحظات</span><input value={operation.notes} onChange={(e) => updateOperation('notes', e.target.value)} /></label>
+          <button className="primary wide">حفظ العملية</button>
+        </form>
+      </div>}
     </Panel>
-    <Panel title="إضافة دفعة شريك" action="كل دفعة تحفظ كسجل مستقل وتؤثر على وسيلة الدفع دون إيراد"><form className="smart-form"><SelectField label="الشريك" value={payment.partner_id} onChange={(v) => setPayment({ ...payment, partner_id: v })}><option value="">اختر الشريك</option>{data.partners.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}</SelectField><label><span>المبلغ</span><input required type="number" min="0.01" value={payment.amount} onChange={(e) => setPayment({ ...payment, amount: e.target.value })} /></label><label><span>التاريخ</span><input required type="date" value={payment.date} onChange={(e) => setPayment({ ...payment, date: e.target.value })} /></label><SelectField label="طريقة الدفع" value={payment.payment_method} onChange={(v) => setPayment({ ...payment, payment_method: v })}>{PAYMENT_METHODS.filter(([key]) => key !== 'credit').map(([key, label]) => <option key={key} value={key}>{label}</option>)}</SelectField><label className="wide"><span>ملاحظات</span><input value={payment.notes} onChange={(e) => setPayment({ ...payment, notes: e.target.value })} /></label><button className="primary wide" onClick={addPayment}>تسجيل الدفعة</button></form><DataTable rows={data.payments} columns={[["date", "التاريخ"],["partner_name", "الشريك"],["amount", "المبلغ", money],["payment_method", "طريقة الدفع", paymentMethodLabel],["notes", "الملاحظات"],["created_by", "أضيف بواسطة"]]} /></Panel>
+
+    {/* Selected partner details */}
+    {selected && <Panel title={`ملف الشريك: ${selected.name}`} action="السجل يعرض العمليات وروابطها">
+      <div className="partner-kpi-row">
+        {[['رأس المال الموثق', selected.paid_capital, false], ['المشتريات الشخصية', selected.personal_purchases, false], ['المستحق المتبقي', selected.remaining_owed, true], ['المسحوبات', selected.withdrawals, false]].map(([label, value, isOwed]) => <div className={`partner-kpi ${isOwed ? 'owed' : ''}`} key={label}><span>{label}</span><strong>{money(value)}</strong></div>)}
+      </div>
+      <DataTable rows={partnerOperations.filter((row) => !query || `${row.item_name || ''} ${row.description || ''} ${row.operation_type || ''}`.toLowerCase().includes(query.toLowerCase()))} columns={[["date", "التاريخ"],["operation_type", "نوع العملية"],["item_name", "الغرض"],["description", "الوصف"],["amount", "المبلغ", money],["funding_mode", "التمويل", (v) => ({ capital: 'زيادة رأس مال', payable: 'مستحق للشريك' }[v] || v || '—')],["payment_method", "الطريقة", paymentMethodLabel],["destination_type", "القسم"],["notes", "الملاحظات"]]} />
+    </Panel>}
   </div>;
 }
 
@@ -442,6 +605,7 @@ function EstablishmentPage({ setToast }) {
   const [data, setData] = useState({ costs: [], categories: [], report: { total: 0, paid: 0, remaining: 0, byCategory: [], capital: {} } });
   const [form, setForm] = useState({ amount: '', paid_amount: '', date: today(), category_id: '', description: '', payment_method: 'cash', linked_source_type: '', linked_source_id: '', notes: '' });
   const [category, setCategory] = useState('');
+  useNewAction('establishment', () => window.scrollTo({ top: window.innerHeight, behavior: 'smooth' }));
   const load = () => api.listEstablishmentCosts().then(setData).catch((e) => setToast(userFacingError(e)));
   useEffect(() => { load(); }, []);
   const save = async (event) => { event.preventDefault(); try { await api.addEstablishmentCost(form); setForm({ ...form, amount: '', paid_amount: '', description: '', notes: '' }); await load(); setToast('تم تسجيل تكلفة التأسيس'); } catch (e) { setToast(userFacingError(e)); } };
@@ -463,6 +627,47 @@ function SystemResetPage({ setToast }) {
   return <div className="screen-stack"><Panel title="تصفير النظام وبدء حسابات جديدة" action="السوبر أدمن فقط — محلياً على Emulator فقط"><div className="notice"><strong>لا يتم حذف المستخدمين أو الصلاحيات أو المنتجات أو الوصفات.</strong><span>سيتم حذف السجلات المالية والحركات السابقة، وتصفير الصندوق، وتصفير المخزون فقط إذا فعّلت الخيار أدناه.</span></div><button className="secondary" onClick={prepare}>1) إنشاء نسخة احتياطية JSON ومعاينة الأعداد</button>{plan && <div className="table-wrap"><table><thead><tr><th>القسم</th><th>عدد السجلات</th></tr></thead><tbody>{Object.entries(plan.counts).map(([key, value]) => <tr key={key}><td>{key}</td><td>{value}</td></tr>)}</tbody></table></div>}<label className="checkbox-label"><input type="checkbox" checked={includeInventory} onChange={(e) => setIncludeInventory(e.target.checked)} /><span>أؤكد تصفير كميات المخزون مع بقاء تعريف المواد والمنتجات</span></label><label><span>اكتب عبارة التأكيد حرفياً</span><input value={confirmation} onChange={(e) => setConfirmation(e.target.value)} placeholder={phrase} /></label><button className="primary" disabled={!backup?.verified || confirmation !== phrase} onClick={execute}>2) تنفيذ التصفير المحلي</button>{result && <div className="notice"><strong>{result.verify.passed ? 'PASS' : 'FAIL'} — تحقق ما بعد التصفير</strong><span>{Object.entries(result.verify.checks).filter(([, value]) => !value).map(([key]) => key).join('، ') || 'جميع المسارات المستهدفة فارغة والقيم صفرية'}</span></div>}</Panel></div>;
 }
 
+function AuditCenterPage({ setToast }) {
+  const [snapshot, setSnapshot] = useState(null);
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("");
+  const [busy, setBusy] = useState(false);
+  const load = async () => {
+    setBusy(true);
+    try { setSnapshot(await api.auditCenterSnapshot()); }
+    catch (error) { setToast?.(userFacingError(error, "تعذر تحميل مركز التدقيق.")); }
+    finally { setBusy(false); }
+  };
+  useEffect(() => { load(); }, []);
+  const download = (filename, body, type) => {
+    const url = URL.createObjectURL(new Blob([body], { type }));
+    const link = document.createElement("a"); link.href = url; link.download = filename; link.click(); URL.revokeObjectURL(url);
+  };
+  const exportJson = () => snapshot && download(`audit-center-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(snapshot, null, 2), "application/json");
+  const exportCsv = () => {
+    if (!snapshot) return;
+    const columns = ["source_filename", "source_sheet", "source_row", "source_provenance_label", "name", "description", "source_date", "month", "quantity", "unit_price", "source_amount", "firebase_amount", "difference", "accounting_class", "category", "destination_type", "destination_id", "destination_status", "report_amount", "status_label", "reason"];
+    const quote = (value) => `"${String(value ?? "").replaceAll("\"", "\"\"")}"`;
+    const rows = [columns, ...snapshot.rows.map((row) => columns.map((key) => row[key]))];
+    download(`audit-center-${new Date().toISOString().slice(0, 10)}.csv`, "\uFEFF" + rows.map((row) => row.map(quote).join(",")).join("\n"), "text/csv;charset=utf-8");
+  };
+  const rows = (snapshot?.rows || []).filter((row) => (!status || row.status === status) && (!query || `${row.name} ${row.description} ${row.source_filename} ${row.source_sheet} ${row.source_row}`.toLowerCase().includes(query.toLowerCase())));
+  const summary = snapshot?.summary || {};
+  const auditMoney = (value) => value == null ? "—" : money(value);
+  if (!snapshot && busy) return <div className="screen-stack"><Panel title="مركز التدقيق والمطابقة"><LoadingBlock /></Panel></div>;
+  return <div className="screen-stack">
+    <Panel title="مركز التدقيق والمطابقة" action="قراءة مباشرة من Firebase — لا يكتب ولا يصحح تلقائياً">
+      <div className="notice"><strong>حالة المطابقة لا تعني اعتماد تصحيح.</strong><span>كل فرق ظاهر بالسطر الأصلي ومصدره ووجهته ومبلغ التقرير. لا توجد كتابة إنتاجية من هذه الصفحة.</span></div>
+      {snapshot?.unavailable?.length > 0 && <div className="duplicate-warning"><strong>مصادر غير متاحة: {snapshot.unavailable.join("، ")}</strong><span>لم تُستنتج منها مطابقة.</span></div>}
+      <div className="report-summary-grid">{[["صفوف المصدر", summary.source_row_count], ["مطابق / تحقق مصدر", summary.matched_count], ["فروقات تحتاج قرار", summary.difference_count], ["وجهات مفقودة", summary.missing_destinations], ["مراجعة تصنيف", summary.classification_reviews], ["مراجعة تكرار", summary.duplicate_reviews], ["إجمالي المصدر", summary.source_total], ["إجمالي الوجهات", summary.firebase_total]].map(([label, value]) => <div className="report-summary-card" key={label}><span>{label}</span><strong>{label.includes("إجمالي") ? auditMoney(value) : Number(value || 0).toLocaleString("ar-IQ")}</strong></div>)}</div>
+      <div className="toolbar"><div className="table-search"><Search size={17} /><input placeholder="بحث بالمصدر أو البند أو الصف..." value={query} onChange={(event) => setQuery(event.target.value)} /></div><select aria-label="حالة المطابقة" value={status} onChange={(event) => setStatus(event.target.value)}><option value="">كل الحالات</option>{Object.entries({ matched: "مطابق", source_only_summary: "تحقق من المصدر فقط", classification_review: "مراجعة تصنيف", duplicate_review: "مراجعة تكرار", destination_missing: "وجهة مفقودة", destination_archived: "وجهة مؤرشفة", amount_mismatch: "اختلاف مبلغ" }).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select><button className="secondary" onClick={load} disabled={busy}>تحديث القراءة</button><button className="secondary" onClick={exportJson} disabled={!snapshot}>تنزيل JSON</button><button className="secondary" onClick={exportCsv} disabled={!snapshot}>تنزيل CSV</button></div>
+      {rows.length ? <DataTable rows={rows} columns={[["source_filename", "الملف"], ["source_sheet", "الورقة"], ["source_row", "الصف"], ["name", "البند"], ["description", "النص الأصلي"], ["source_date", "التاريخ"], ["month", "الشهر", (value) => value || "بدون شهر"], ["quantity", "الكمية", (value) => value ?? "—"], ["unit_price", "سعر الوحدة", auditMoney], ["source_amount", "مبلغ المصدر", auditMoney], ["firebase_amount", "مبلغ Firebase", auditMoney], ["difference", "الفرق", auditMoney], ["accounting_class", "التصنيف"], ["category", "الفئة"], ["destination_type", "الوجهة"], ["destination_id", "معرف الوجهة"], ["destination_status", "حالة الوجهة"], ["report_amount", "داخل التقارير", auditMoney], ["status_label", "الحالة"], ["reason", "السبب"]]} /> : <Empty text="لا توجد صفوف بهذا الفلتر" />}
+    </Panel>
+    <Panel title="ملخص الأصول النشطة ذات التسع فئات"><div className="report-summary-grid">{(snapshot?.assets?.categories || []).map((row) => <div className="report-summary-card" key={row.id}><span>{row.name}</span><strong>{auditMoney(row.total)}</strong><small>{row.count.toLocaleString("ar-IQ")} أصل</small></div>)}</div><div className="notice"><strong>الأصول النشطة: {snapshot?.assets?.activeCount || 0} · {auditMoney(snapshot?.assets?.activeTotal)}</strong><span>الأصول المؤرشفة أو المصنفة خارج الأصول لا تدخل في هذا الإجمالي.</span></div></Panel>
+    <Panel title="مطابقة المبيعات والصندوق والمخزون" action="قراءة أولية؛ لا تُنشئ حركة بيع أو مخزون"><div className="report-summary-grid">{[["عمليات المبيعات", snapshot?.sales?.rows?.length || 0], ["مطابقة / غير منطبقة", snapshot?.sales?.matched || 0], ["مشكلات الدفع", snapshot?.sales?.issues || 0], ["سجل التدقيق", snapshot?.audit_log_count || 0]].map(([label, value]) => <div className="report-summary-card" key={label}><span>{label}</span><strong>{Number(value).toLocaleString("ar-IQ")}</strong></div>)}</div></Panel>
+  </div>;
+}
+
 function Screen({ active, canPage, ...p }) {
   if (!canPage(active)) return <AccessDenied />;
   const map = {
@@ -478,10 +683,13 @@ function Screen({ active, canPage, ...p }) {
     categories: Categories,
     inventory: Inventory,
     expenses: Expenses,
+    monthly_expenses: MonthlyExpenses,
     other_income: OtherIncome,
     employees: Employees,
     payroll: Payroll,
     assets: Assets,
+    audit_center: AuditCenterPage,
+    historical_imports: HistoricalImports,
     suppliers: Suppliers,
     debts: Debts,
     cash: Cash,
@@ -550,6 +758,7 @@ function Dashboard({ setToast, can, canPage, selectedMonth, reportRange = { mode
   const [data, setData] = useState(null),
     [pins, setPins] = useState([]),
     [comparisonData, setComparisonData] = useState(null),
+    [showMoreKpis, setShowMoreKpis] = useState(false),
     [legacyPayrollModal, setLegacyPayrollModal] = useState(false);
   useEffect(() => {
     let mounted = true;
@@ -557,7 +766,7 @@ function Dashboard({ setToast, can, canPage, selectedMonth, reportRange = { mode
       api.reportRange(reportRange).then((report) => {
         if (!mounted) return;
         const rows = aggregateFinancialTimeline({ sales: report.rows?.sales || [], purchases: report.rows?.purchases || [], fromDate: reportRange.fromDate, toDate: reportRange.toDate });
-        setData({ metrics: { revenue: report.summary?.netSales, purchases: report.summary?.purchases, expenses: report.summary?.expenses, netProfitBeforePayroll: report.summary?.netResult, netProfitAfterPayroll: report.summary?.netResult, canSeeRevenue: true, todaySalesCount: 0, operationCount: rows.reduce((n, x) => n + x.salesCount + x.purchaseCount, 0) }, monthly: rows, expenseByCategory: [], recent: [] });
+        setData({ metrics: { revenue: report.summary?.netSales, purchases: report.summary?.purchases, expenses: report.summary?.operatingExpenses, netProfitBeforePayroll: null, netProfitAfterPayroll: null, profitabilityStatus: report.summary?.profitabilityStatus, canSeeRevenue: true, todaySalesCount: 0, operationCount: rows.reduce((n, x) => n + x.salesCount + x.purchaseCount, 0) }, monthly: rows, expenseByCategory: [], recent: [] });
       }).catch(() => mounted && setData({ metrics: {}, monthly: [], expenseByCategory: [], recent: [] }));
       return () => { mounted = false; };
     }
@@ -639,7 +848,7 @@ function Dashboard({ setToast, can, canPage, selectedMonth, reportRange = { mode
     <div className="screen-stack dashboard-reference">
       <section className="period-banner"><div><strong>الفترة المالية: {monthLabel(selectedMonth)}</strong><span className={isMonthClosed ? "closed" : "open"}>{isMonthClosed ? "مغلقة" : "مفتوحة"}</span></div>{isMonthClosed && can("monthly_periods.reopen") && <div className="period-actions"><button className="secondary" onClick={async () => { const reason = window.prompt("اذكر سبب إعادة فتح الشهر:"); if (!reason?.trim()) return; try { await api.reopenMonth(selectedMonth, reason); setToast("تمت إعادة فتح الشهر"); } catch (e) { setToast(e.message); } }}>إعادة فتح الشهر</button></div>}</section>
       <section className="kpi-grid">
-        {k.slice(0, 6).map(([l, v, Icon, state, , , help], i) => (
+        {k.slice(0, 4).map(([l, v, Icon, state, , , help], i) => (
           <article className={`kpi kpi-ref kpi-${i}`} key={l} title={v == null ? `${help} — غير متوفر` : help}>
             <div className="kpi-copy">
               <span>{l}</span>
@@ -654,77 +863,77 @@ function Dashboard({ setToast, can, canPage, selectedMonth, reportRange = { mode
           </article>
         ))}
       </section>
-      {canSeeRevenue && <section className="kpi-group kpi-supporting-group"><div className="section-title"><div><h2>مراجعة وتفاصيل مالية</h2></div></div><section className="kpi-grid">{k.slice(6).map(([l, v, Icon, state, , , help], i) => <article className={`kpi kpi-ref kpi-support-${i}`} key={l} title={v == null ? `${help} — غير متوفر` : help}><div className="kpi-copy"><span>{l}</span><strong>{displayMoney(v)}</strong><small className={state === "down" ? "negative" : ""}>الفترة: {monthLabel(selectedMonth)}</small></div><div className="kpi-icon"><Icon size={23} /></div></article>)}</section></section>}
-      {canSeeSensitiveFinancial && m.payrollDue == null && <section className="period-banner legacy-payroll-notice"><div><strong>تكلفة الرواتب غير متوفرة</strong><span>توجد بيانات رواتب قديمة لا يمكن تحديد تكلفتها بأمان.</span></div>{isSuperAdmin && !isMonthClosed && <button className="secondary" onClick={() => setLegacyPayrollModal(true)}>إدخال تكلفة الرواتب التاريخية</button>}</section>}
-      <section className="section-title">
+
+      {/* Supporting details toggle */}
+      {canSeeRevenue && (
         <div>
-          <h2>الأقسام الرئيسية للمشتريات</h2>
-        </div>
-        {canPage("categories") && <button className="text-btn" onClick={() => go("categories")}>
-          <SlidersHorizontal size={16} /> إدارة الأقسام
-        </button>}
-      </section>
-      {canSeeSensitiveFinancial && <section className="kpi-group payroll-result-group"><div className="section-title"><div><h2>الرواتب والنتيجة</h2></div></div><section className="kpi-grid">{[["تكلفة الرواتب", m.payrollDue, Users, "down", "تكلفة رواتب الموظفين للشهر"], ["صافي المبلغ قبل الرواتب", m.netProfitBeforePayroll, Zap, "up", "الوارد الكلي + الإيرادات الأخرى - المشتريات - المصروفات التشغيلية، قبل احتساب تكلفة الرواتب."], ["صافي المبلغ بعد الرواتب", m.netProfitAfterPayroll, Zap, "up", "صافي المبلغ بعد خصم تكلفة الرواتب."]].map(([l, v, Icon, state, help]) => <article className="kpi kpi-ref" key={l} title={help}><div className="kpi-copy"><span>{l}</span><strong>{displayMoney(v)}</strong><small className={state === "down" ? "negative" : ""}>الفترة: {monthLabel(selectedMonth)}</small></div><div className="kpi-icon"><Icon size={23} /></div></article>)}</section></section>}
-      <section className="category-grid">
-        {categories.map(([l, d, Icon, id]) => (
           <button
-            className="category-card"
-            key={id}
-            onClick={() => go("inventory")}
+            className="secondary"
+            style={{ fontSize: '11px', padding: '6px 12px', marginBottom: '8px' }}
+            onClick={() => setShowMoreKpis(!showMoreKpis)}
           >
-            <span className="category-art">
-              <Icon size={36} />
-            </span>
-            <strong>{l}</strong>
-            <small>{d}</small>
-            <span className="category-action">←</span>
+            {showMoreKpis ? 'إخفاء التفاصيل المالية الإضافية ▲' : 'عرض تفاصيل نقدية وإلكترونية إضافية ▼'}
           </button>
-        ))}
-      </section>
-      <section className="ops-layout">
-        <div>
-          <h2>المصروفات</h2>
-          <div className="mini-category-grid">
-            {operational.slice(3).filter(([, , , id]) => canPage(id)).map(([l, d, Icon, id]) => (
-              <button
-                className="mini-category-card"
-                key={l}
-                onClick={() => go(id)}
-              >
-                <span>
-                  <Icon size={26} />
-                </span>
-                <strong>{l}</strong>
-                <small>{d}</small>
-              </button>
-            ))}
-          </div>
+          {showMoreKpis && (
+            <section className="kpi-grid" style={{ marginBottom: '14px' }}>
+              {k.slice(4).map(([l, v, Icon, state, , , help], i) => (
+                <article className={`kpi kpi-ref kpi-support-${i % 3}`} key={l} title={v == null ? `${help} — غير متوفر` : help}>
+                  <div className="kpi-copy">
+                    <span>{l}</span>
+                    <strong>{displayMoney(v)}</strong>
+                    <small className={state === "down" ? "negative" : ""}>الفترة: {monthLabel(selectedMonth)}</small>
+                  </div>
+                  <div className="kpi-icon">
+                    <Icon size={20} />
+                  </div>
+                </article>
+              ))}
+            </section>
+          )}
         </div>
-        <div>
-          <h2>إدارة الأعمال</h2>
-          <div className="mini-category-grid">
-            {operational.slice(0, 3).filter(([, , , id]) => canPage(id)).map(([l, d, Icon, id]) => (
-              <button
-                className="mini-category-card"
-                key={l}
-                onClick={() => go(id)}
-              >
-                <span>
-                  <Icon size={26} />
-                </span>
-                <strong>{l}</strong>
-                <small>{d}</small>
-              </button>
-            ))}
-          </div>
+      )}
+
+      {canSeeSensitiveFinancial && m.payrollDue == null && (
+        <section className="period-banner legacy-payroll-notice">
+          <div><strong>تكلفة الرواتب غير متوفرة</strong><span>توجد بيانات رواتب قديمة لا يمكن تحديد تكلفتها بأمان.</span></div>
+          {isSuperAdmin && !isMonthClosed && <button className="secondary" onClick={() => setLegacyPayrollModal(true)}>إدخال تكلفة الرواتب التاريخية</button>}
+        </section>
+      )}
+
+      {/* Main Financial Analytics & Charts Section */}
+      <section className="analytics-grid">
+        {canSeeRevenue && (
+          <Panel title="حركة الأموال الشهرية" action={`المبيعات والمشتريات والمصروفات — ${monthLabel(selectedMonth)}`}>
+            <MiniBars data={data.monthly || []} detailed />
+          </Panel>
+        )}
+        <div style={{ display: 'grid', gap: '16px' }}>
+          {canSeeRevenue && (
+            <Panel title="توزيع المصروفات حسب الأقسام">
+              <div className="donut-row">
+                <div className="donut" />
+                <div className="legend">
+                  {(data.expenseByCategory || []).slice(0, 5).map((x, i) => (
+                    <span key={i}>
+                      <i className={`legend-dot dot-${i}`} />
+                      {x.label || x.category || "أخرى"} <b>{x.percent || 0}%</b>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </Panel>
+          )}
+          <Panel title="مقارنة بالفترة السابقة" action={reportRange?.mode === "custom" ? "عن الفترة السابقة" : "عن الشهر السابق"}>
+            <ComparisonGrid data={comparisonData} />
+          </Panel>
         </div>
       </section>
+
+      {/* Quick Access */}
       <section className="section-title pins-title">
         <div>
-          <h2>المربعات المثبتة في الداشبورد</h2>
-          <p className="muted">يمكن تثبيت 4 أقسام فقط لكل مستخدم.</p>
+          <h2>الوصول السريع</h2>
         </div>
-        <span className="pin-count">{pins.length || 4}/4</span>
       </section>
       <section className="pinned-grid">
         {pinCards.filter(([, , , id]) => canPage(id)).map(([l, d, Icon, id]) => (
@@ -736,52 +945,29 @@ function Dashboard({ setToast, can, canPage, selectedMonth, reportRange = { mode
               <strong>{l}</strong>
               <small>{d}</small>
             </span>
-            <PinMark />
           </button>
         ))}
       </section>
-      <section className="analytics-grid analytics-reference">
-        {canSeeRevenue && <Panel title="المبيعات خلال آخر 7 أيام">
-          <MiniBars data={data.monthly || []} />
-        </Panel>}
-        {canSeeRevenue && <Panel title="توزيع المشتريات حسب الأقسام">
-          <div className="donut-row">
-            <div className="donut" />
-            <div className="legend">
-              {(data.expenseByCategory || []).slice(0, 5).map((x, i) => (
-                <span key={i}>
-                  <i className={`legend-dot dot-${i}`} />
-                  {x.label || x.category || "أخرى"} <b>{x.percent || 0}%</b>
-                </span>
-              ))}
-            </div>
-          </div>
-        </Panel>}
-          <Panel title="المبيعات والمشتريات" action="الوارد الكلي مقابل المشتريات — للفترة المحددة">
-            <MiniBars data={data.monthly || []} detailed />
-          </Panel>
-          <Panel title="مقارنة بالفترة السابقة" action={reportRange?.mode === "custom" ? "عن الفترة السابقة" : "عن الشهر السابق"}>
-            <ComparisonGrid data={comparisonData} />
-          </Panel>
-          <Panel title="آخر العمليات">
-          <div className="activity-list">
-            {(data.recent || []).length ? (
-              data.recent.map((r, i) => (
-                <div key={i}>
-                  <span className="activity-dot" />
-                  <div>
-                    <strong>{r.label || r.description || "عملية مالية"}</strong>
-                    <small>{r.date || "اليوم"}</small>
-                  </div>
-                  {canSeeRevenue && <b>{money(r.amount || r.total || 0)}</b>}
+
+      {/* Recent operations */}
+      <Panel title="آخر العمليات">
+        <div className="activity-list">
+          {(data.recent || []).length ? (
+            data.recent.map((r, i) => (
+              <div key={i}>
+                <span className="activity-dot" />
+                <div>
+                  <strong>{r.label || r.description || "عملية مالية"}</strong>
+                  <small>{r.date || "اليوم"}</small>
                 </div>
-              ))
-            ) : (
-              <Empty text="لا توجد عمليات مسجلة بعد" />
-            )}
-          </div>
-        </Panel>
-      </section>
+                {canSeeRevenue && <b>{money(r.amount || r.total || 0)}</b>}
+              </div>
+            ))
+          ) : (
+            <Empty text="لا توجد عمليات مسجلة بعد" />
+          )}
+        </div>
+      </Panel>
       <MonthClosePanel month={selectedMonth} isClosed={isMonthClosed} can={can} setToast={setToast} onMonthClosed={onMonthClosed} />
       {legacyPayrollModal && <Modal title="إدخال تكلفة الرواتب التاريخية" onClose={() => setLegacyPayrollModal(false)}><LegacyPayrollCostForm month={selectedMonth} onDone={async () => { setLegacyPayrollModal(false); setData(await api.dashboard(selectedMonth)); setToast("تم اعتماد تكلفة الرواتب التاريخية"); }} /></Modal>}
     </div>
@@ -808,26 +994,47 @@ function MiniBars({ data, detailed = false }) {
   const rows = data.length ? data : [];
   if (!rows.length) return <Empty text="لا توجد بيانات لهذه الفترة" />;
   const max = Math.max(
-    ...rows.map((x) => Math.max(Number(x.revenue || x.sales || 0), Number(x.purchases || 0))),
+    ...rows.map((x) => Math.max(Number(x.revenue || x.sales || 0), Number(x.purchases || 0), Number(x.expenses || 0), Number(x.otherIncome || 0))),
     1,
   );
   return (
     <div className="chart-wrap">
       <div className="chart-legend">
-        <span><i className="legend-dot dot-0" />الوارد الكلي</span>
-        <span><i className="legend-dot dot-2" />المشتريات</span>
+        <span><i className="legend-dot dot-0" />المبيعات</span>
+        <span><i className="legend-dot dot-1" />المشتريات</span>
+        <span><i className="legend-dot dot-4" />المصروفات</span>
+        <span><i className="legend-dot dot-3" />إيرادات أخرى</span>
       </div>
       <div className="chart-scroll">
-        <div className={`mini-chart ${detailed ? "mini-chart-detailed" : ""}`} role="img" aria-label="المبيعات والمشتريات">
-          {(detailed ? rows : rows.slice(-7)).map((x, i) => (
-            <div className="bar-col" key={i} onMouseEnter={() => setHovered(i)} onMouseLeave={() => setHovered(null)}>
-              <div className="bar-pair">
-                <div className="bar revenue-bar" style={{ height: `${Math.max(4, (Number(x.revenue || x.sales || 0) / max) * 100)}%` }} />
-                <div className="bar purchases-bar" style={{ height: `${Math.max(4, (Number(x.purchases || 0) / max) * 100)}%` }} />
-              </div>{hovered === i && <div className="chart-tooltip"><strong>{x.date || x.day || "—"}</strong><span>الوارد الكلي: {money(x.revenue || x.sales || 0)}</span><span>المشتريات: {money(x.purchases || 0)}</span><span>عدد عمليات البيع: {Number(x.salesCount || 0)}</span><span>عدد عمليات الشراء: {Number(x.purchaseCount || 0)}</span><span>المبيعات النقدية: {money(x.cashSales || 0)}</span><span>المبيعات الإلكترونية: {money(x.electronicSales || 0)}</span><span>تحتاج مراجعة: {Number(x.reviewCount || 0)}</span></div>}
-              <small>{detailed ? (x.date || "").slice(5) : (x.day || x.label || "")}</small>
-            </div>
-          ))}
+        <div className={`mini-chart ${detailed ? "mini-chart-detailed" : ""}`} role="img" aria-label="حركة الأموال المالية">
+          {(detailed ? rows : rows.slice(-7)).map((x, i) => {
+            const rev = Number(x.revenue || x.sales || 0);
+            const pur = Number(x.purchases || 0);
+            const exp = Number(x.expenses || 0);
+            const oth = Number(x.otherIncome || 0);
+            return (
+              <div className="bar-col" key={i} onMouseEnter={() => setHovered(i)} onMouseLeave={() => setHovered(null)}>
+                <div className="bar-group">
+                  <div className="bar revenue-bar" style={{ height: `${Math.max(rev > 0 ? 4 : 0, (rev / max) * 100)}%` }} title={`المبيعات: ${money(rev)}`} />
+                  <div className="bar purchases-bar" style={{ height: `${Math.max(pur > 0 ? 4 : 0, (pur / max) * 100)}%` }} title={`المشتريات: ${money(pur)}`} />
+                  <div className="bar expenses-bar" style={{ height: `${Math.max(exp > 0 ? 4 : 0, (exp / max) * 100)}%` }} title={`المصروفات: ${money(exp)}`} />
+                  {oth > 0 && <div className="bar other-income-bar" style={{ height: `${Math.max(4, (oth / max) * 100)}%` }} title={`إيرادات أخرى: ${money(oth)}`} />}
+                </div>
+                {hovered === i && (
+                  <div className="chart-tooltip">
+                    <strong>{x.date || x.day || "—"}</strong>
+                    <span>المبيعات: {money(rev)}</span>
+                    <span>المشتريات: {money(pur)}</span>
+                    <span>المصروفات: {money(exp)}</span>
+                    {oth > 0 && <span>إيرادات أخرى: {money(oth)}</span>}
+                    <span>عمليات البيع: {Number(x.salesCount || 0)}</span>
+                    <span>عمليات الشراء: {Number(x.purchaseCount || 0)}</span>
+                  </div>
+                )}
+                <small>{detailed ? (x.date || "").slice(5) : (x.day || x.label || "")}</small>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -892,7 +1099,7 @@ function MonthClosePanel({ month, isClosed, can, setToast, onMonthClosed }) {
   const groups = [["BLOCKING", "يمنع الإغلاق"], ["WARNING", "يحتاج مراجعة"], ["INFO", "معلومات"]];
   const blocking = (review || []).filter((item) => item.severity === "BLOCKING").length;
   const close = async () => { if (blocking || isClosed || !can("monthly_periods.close")) return; if (!window.confirm("سيتم إغلاق الشهر، ترحيل الرصيد النقدي المؤكد، ثم الانتقال إلى الشهر التالي.")) return; setBusy(true); try { const result = await api.closeMonth(month, { actual_counted_cash: actualCash, notes }); onMonthClosed?.(result.next_month); } catch (error) { setToast?.(error.message); } finally { setBusy(false); } };
-  const values = [["الوارد الكلي", metrics.revenue ?? summary.netSales], ["المبيعات النقدية", metrics.cashSales], ["المبيعات الإلكترونية", metrics.electronicSales], ["إجمالي المشتريات", metrics.purchases ?? summary.purchases], ["الإيرادات الأخرى", metrics.otherIncome], ["إجمالي المصروفات", metrics.expenses ?? summary.expenses], ["تكلفة الرواتب", metrics.payrollDue], ["صافي المبلغ قبل الرواتب", metrics.netProfitBeforePayroll], ["صافي المبلغ بعد الرواتب", metrics.netProfitAfterPayroll ?? summary.netResult], ["رصيد الصندوق", cash?.expectedClosingCash]];
+  const values = [["الوارد الكلي", metrics.revenue ?? summary.netSales], ["المبيعات النقدية", metrics.cashSales], ["المبيعات الإلكترونية", metrics.electronicSales], ["إجمالي المشتريات", metrics.purchases ?? summary.purchases], ["الإيرادات الأخرى", metrics.otherIncome], ["إجمالي المصروفات التشغيلية", metrics.expenses ?? summary.operatingExpenses], ["تكلفة الرواتب", metrics.payrollDue], ["مجمل الربح", null], ["صافي الربح", null], ["رصيد الصندوق", cash?.expectedClosingCash]];
   return <section className="month-close-layout"><Panel title="مراجعة إغلاق الشهر" action="قائمة تحقق قبل الإغلاق — لا تغيّر قواعد الشهر"><div className="close-groups">{groups.map(([severity, title]) => <div className={`close-group close-${severity.toLowerCase()}`} key={severity}><div className="close-group-head"><strong>{title}</strong><span>{(review || []).filter((item) => item.severity === severity).length}</span></div>{(review || []).filter((item) => item.severity === severity).map((item) => <div className="close-item" key={item.code}><strong>{item.label || item.code}</strong><span>{item.detail || "—"}</span></div>)}{!(review || []).some((item) => item.severity === severity) && <small>لا توجد بنود</small>}</div>)}</div>{!isClosed && <div className="smart-form close-cash-confirm"><label><span>الرصيد النقدي المؤكد للإقفال</span><input required type="number" min="0" placeholder={cash?.expectedClosingCash == null ? "أدخل الرصيد الفعلي" : `المتوقع ${cash.expectedClosingCash}`} value={actualCash} onChange={(event) => setActualCash(event.target.value)} /></label><label><span>ملاحظات مطابقة الصندوق</span><input value={notes} onChange={(event) => setNotes(event.target.value)} /></label></div>}<div className="close-actions"><button className="primary" disabled={busy || blocking > 0 || isClosed || !can("monthly_periods.close") || actualCash === ""} onClick={close}>{isClosed ? "الشهر مغلق" : blocking ? "معالجة البنود المانعة أولاً" : busy ? "جارٍ الإغلاق..." : "تأكيد الإغلاق والترحيل"}</button></div></Panel><Panel title="ملخص الإغلاق"><div className="report-summary-grid close-summary">{values.map(([label, value]) => <div className="report-summary-card" key={label}><span>{label}</span><strong>{value == null ? "—" : money(value)}</strong></div>)}</div><div className="carry-forward-card"><strong>رصيد مرحّل من الشهر السابق</strong>{carry ? <span>{carry.source_month ? `مرحّل من ${monthLabel(carry.source_month)}` : "مرحّل من الشهر السابق"} · {money(carry.carried_amount ?? carry.opening_cash)} · {carry.status === "applied" ? "مطبق" : carry.status || "قيد المراجعة"}</span> : <span>لا يوجد رصيد مرحّل مسجل لهذه الفترة</span>}</div></Panel></section>;
 }
 function Panel({ title, action, children }) {
@@ -907,6 +1114,17 @@ function Panel({ title, action, children }) {
       {children}
     </section>
   );
+}
+function useNewAction(pageId, onAction) {
+  const actionRef = useRef(onAction);
+  actionRef.current = onAction;
+  useEffect(() => {
+    const handler = (event) => {
+      if (event.detail === pageId) actionRef.current?.();
+    };
+    document.addEventListener("app:new-action", handler);
+    return () => document.removeEventListener("app:new-action", handler);
+  }, [pageId]);
 }
 function CrudPage({
   title,
@@ -1048,8 +1266,8 @@ function DataTable({ rows, columns, onEdit, onDelete, onAudit, rowActions, actio
       <table>
         <thead>
           <tr>
-            {columns.map(([, l]) => (
-              <th key={l}>{l}</th>
+            {columns.map(([k, l]) => (
+              <th key={k}>{l}</th>
             ))}
             {(onEdit || onDelete || rowActions) && <th>إجراءات</th>}
           </tr>
@@ -1270,7 +1488,7 @@ function Purchases(p) {
   useEffect(() => {
     const handleNewAction = (event) => {
       if (event.detail !== "purchases") return;
-      if (p.can("purchase_invoices.create") && !p.isMonthClosed) setShow(true);
+      if ((p.can("purchase_invoices.create") || p.can("purchases.create")) && !p.isMonthClosed) setShow(true);
     };
     document.addEventListener("app:new-action", handleNewAction);
     return () => document.removeEventListener("app:new-action", handleNewAction);
@@ -1351,6 +1569,71 @@ function OtherIncomeCategoryManager({ categories, onChanged }) {
 }
 function Expenses(p) {
   return <CrudPage {...p} title="المصروفات" subtitle="هرمية: قسم رئيسي ← قسم فرعي ← مصروف فعلي" entity="expenses" columns={[["date", "التاريخ"], ["category_name", "القسم الرئيسي"], ["subcategory_name", "القسم الفرعي"], ["description", "الوصف"], ["amount", "المبلغ", money], ["payment_status", "حالة الدفع", (v) => ({ paid: "مدفوع بالكامل", partial: "مدفوع جزئيًا", unpaid: "آجل / غير مدفوع" }[v] || v)], ["payment_method", "الدفع"], ["created_by_name", "الموظف"]]} action="إضافة مصروف" pageId="expenses" form={({ onDone, initial }) => <ExpenseForm onDone={onDone} initial={initial} isMonthClosed={p.isMonthClosed} />} />;
+}
+
+const MONTHLY_EXPENSE_CATEGORIES = [
+  ["مواد القهوة", /بن|قهو|حليب|سيروب|ايسكريم|كيك|حلويات|فواكه|ليمون|برتقال/],
+  ["مواد غذائية وحلويات", /مواد غذ|اغذية|حلويات|كيك|طعام/],
+  ["مولدة وكهرباء", /مولد|كاز|كهرب|طاقة/],
+  ["احتياجات المحل", /احتياجات|مستلزمات|أسواق|اسواق|مواد تشغيل/],
+  ["رواتب وأجور", /راتب|اجور|أجور|موظف/],
+  ["نقل وتوصيل", /توصيل|كروة|مندوب|دلفري|ديلفري|نقل/],
+  ["صيانة", /صيانة|تصليح|اصلاح/],
+  ["إنترنت وشبكات", /انترنت|إنترنت|شبكات|واي.?فاي/],
+  ["ضيافة", /ضيافة|عزيمة|غداء|وجبات/],
+  ["أصول وتجهيزات", /أصل|اصل|تجهيز|معدات|ماكينة|كاونتر/],
+  ["مصاريف أشخاص", /ميس|علي|روان|محمد حسن|رافد|دكتور رافد/],
+];
+const monthlyExpenseCategory = (row, path) => {
+  if (path === "assets" || row.accounting_class === "fixed_asset") return "أصول وتجهيزات";
+  const text = `${row.category_name || row.category || ""} ${row.subcategory_name || row.subcategory || ""} ${row.description || row.name || row.item_name || ""} ${row.original_expense_type || ""} ${row.original_details || ""}`;
+  return MONTHLY_EXPENSE_CATEGORIES.find(([, pattern]) => pattern.test(text))?.[0] || (path === "purchases" ? "مواد غذائية وحلويات" : "أخرى");
+};
+const monthlyExpenseAmount = (row) => Number(row.amount ?? row.total_after_discount ?? row.total ?? row.purchase_price ?? row.paid_amount ?? 0);
+const monthlyExpenseMonth = (row) => String(row.month || row.accounting_month || row.date || row.purchase_date || row.transaction_date || "").slice(0, 7);
+
+function MonthlyExpenses({ setToast }) {
+  const [month, setMonth] = useState("2026-07");
+  const [rows, setRows] = useState([]);
+  const [query, setQuery] = useState("");
+  const [payment, setPayment] = useState("all");
+  const [kind, setKind] = useState("all");
+  const [busy, setBusy] = useState(true);
+  const load = async () => {
+    setBusy(true);
+    try {
+      const sources = await Promise.all(["expenses", "purchases", "assets", "establishment_costs"].map((path) => api.list(path).catch(() => []).then((items) => items.map((row) => ({ ...row, __path: path })))));
+      const seen = new Set();
+      const unified = sources.flat().filter((row) => row.deleted !== true && !["classified_elsewhere", "archived", "inactive"].includes(row.status)).filter((row) => {
+        const key = row.operation_id || row.operation_key || row.source_key || row.source_id || row.historical_import_id || `${row.__path}:${row.id}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      setRows(unified);
+    } catch (error) { setToast?.(userFacingError(error)); }
+    finally { setBusy(false); }
+  };
+  useEffect(() => { load(); }, []);
+  const monthRows = rows.filter((row) => monthlyExpenseMonth(row) === month);
+  const filtered = monthRows.filter((row) => {
+    const method = row.payment_method || "cash";
+    const category = monthlyExpenseCategory(row, row.__path);
+    const text = `${row.description || ""} ${row.name || ""} ${row.item_name || ""} ${row.category_name || ""}`.toLowerCase();
+    return (payment === "all" || method === payment) && (kind === "all" || (kind === "assets" && category === "أصول وتجهيزات") || (kind === "purchases" && row.__path === "purchases") || (kind === "expenses" && row.__path === "expenses")) && (!query || text.includes(query.toLowerCase()));
+  });
+  const total = monthRows.reduce((sum, row) => sum + monthlyExpenseAmount(row), 0);
+  const operating = monthRows.filter((row) => monthlyExpenseCategory(row, row.__path) !== "أصول وتجهيزات").reduce((sum, row) => sum + monthlyExpenseAmount(row), 0);
+  const assets = monthRows.filter((row) => monthlyExpenseCategory(row, row.__path) === "أصول وتجهيزات").reduce((sum, row) => sum + monthlyExpenseAmount(row), 0);
+  const purchases = monthRows.filter((row) => row.__path === "purchases" || monthlyExpenseCategory(row, row.__path) === "مواد القهوة" || monthlyExpenseCategory(row, row.__path) === "مواد غذائية وحلويات").reduce((sum, row) => sum + monthlyExpenseAmount(row), 0);
+  const categoryRows = MONTHLY_EXPENSE_CATEGORIES.map(([name]) => ({ name, rows: monthRows.filter((row) => monthlyExpenseCategory(row, row.__path) === name) })).concat([{ name: "أخرى", rows: monthRows.filter((row) => monthlyExpenseCategory(row, row.__path) === "أخرى") }]).filter((item) => item.rows.length);
+  return <div className="screen-stack">
+    <Panel title="مصاريف الشهر" action="سجل مالي واحد — طرق عرض متعددة">
+      <div className="toolbar"><label><span>الشهر والسنة</span><input type="month" value={month} onChange={(event) => setMonth(event.target.value)} /></label><div className="table-search"><Search size={17} /><input placeholder="بحث بالوصف أو المورد..." value={query} onChange={(event) => setQuery(event.target.value)} /></div><select aria-label="طريقة الدفع" value={payment} onChange={(event) => setPayment(event.target.value)}><option value="all">كل طرق الدفع</option><option value="cash">نقدي</option><option value="electronic">إلكتروني</option><option value="transfer">تحويل</option></select><select aria-label="نوع السجل" value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">كل السجلات</option><option value="expenses">مصروفات</option><option value="purchases">مشتريات</option><option value="assets">أصول</option></select><button className="secondary" onClick={load} disabled={busy}>تحديث</button></div>
+      <div className="report-summary-grid"><div className="report-summary-card"><span>إجمالي الخارج</span><strong>{money(total)}</strong></div><div className="report-summary-card"><span>المصاريف التشغيلية</span><strong>{money(operating)}</strong></div><div className="report-summary-card"><span>المشتريات والمواد</span><strong>{money(purchases)}</strong></div><div className="report-summary-card"><span>الأصول المدفوعة</span><strong>{money(assets)}</strong></div></div>
+      {busy ? <LoadingBlock /> : <><div className="report-summary-grid">{categoryRows.map((item) => <div className="report-summary-card" key={item.name}><span>{item.name}</span><strong>{money(item.rows.reduce((sum, row) => sum + monthlyExpenseAmount(row), 0))}</strong><small>{item.rows.length.toLocaleString("ar-IQ")} حركة</small></div>)}</div>{filtered.length ? <DataTable rows={filtered.map((row) => ({ ...row, category_display: monthlyExpenseCategory(row, row.__path), amount_display: monthlyExpenseAmount(row), source_display: row.__path }))} columns={[["date", "التاريخ", (value, row) => value || row.purchase_date || row.transaction_date || "—"], ["description", "الوصف", (value, row) => value || row.name || row.item_name || "—"], ["beneficiary", "الشخص / المورد", (value, row) => value || row.supplier_name || row.person_name || "—"], ["amount_display", "المبلغ", money], ["category_display", "الفئة"], ["subcategory_name", "القسم الفرعي", (value) => value || "—"], ["payment_method", "طريقة الدفع", (value) => ({ cash: "نقدي", electronic: "إلكتروني", transfer: "تحويل", historical: "تاريخي" }[value] || value || "—")], ["accounting_class", "التصنيف المحاسبي", (value, row) => value || (row.__path === "assets" ? "fixed_asset" : row.__path === "purchases" ? "supplies" : "operating_expense")], ["__path", "المصدر"], ["id", "رقم السجل"]]} /> : <Empty text="لا توجد حركات بهذا الشهر أو الفلتر" />}</>}
+    </Panel>
+  </div>;
 }
 function ExpenseForm({ onDone, initial, isMonthClosed = false }) {
   const [form, setForm] = useState({ date: today(), payment_status: "paid", paid_amount: "", payment_method: "cash", ...initial });
@@ -1669,28 +1952,280 @@ function LegacyLinkHost({ setToast }) {
   const create = async (form) => { const matches = employees.filter((employee) => normalized(employee.name) === normalized(form.name)); if (matches.length && !similar.length) { setSimilar(matches); return; } try { const employee = await api.create("employees", { ...form, status: form.status || "active" }); await link(employee); } catch { setToast?.("تعذر إنشاء ملف الموظف"); } };
   return <Modal title="ربط بملف موظف" onClose={close}>{!creating && !similar.length && <><div className="legacy-summary"><strong>{row.employee_name || row.employee || "موظف Legacy"}</strong><span>الشهر: {row.month || "—"}</span><span>القيمة التاريخية: {row.base_salary || row.net || "غير متاحة"}</span></div><label className="legacy-search"><span>ابحث بالاسم أو رقم الهاتف</span><input value={query} onChange={(e) => setQuery(e.target.value)} /></label><div className="profile-list">{results.map((employee) => <div key={employee.id}><div><strong>{employee.name}</strong><span>{employee.phone || "—"} · {employee.job_title || "—"} · {money(employee.base_salary)}</span></div><button className="primary" onClick={() => setSelected(employee)}>اختيار</button></div>)}</div>{selected && <div className="notice"><div><strong>سيتم ربط السجل التاريخي بـ {selected.name}</strong><span>لن يتم تغيير البيانات التاريخية القديمة.</span></div><button className="primary" onClick={() => link(selected)}>تأكيد الربط</button></div>}<button className="secondary wide" onClick={() => setCreating(true)}>إنشاء ملف موظف جديد</button></>}{similar.length > 0 && <div className="duplicate-warning"><strong>يوجد موظف مشابه مسجل مسبقاً</strong>{similar.map((employee) => <div className="profile-list" key={employee.id}><div><strong>{employee.name}</strong><span>{employee.phone || "—"} · {employee.job_title || "—"} · {money(employee.base_salary)}</span></div><button className="primary" onClick={() => { setSimilar([]); link(employee); }}>استخدام الموظف الموجود</button></div>)}<button className="secondary" onClick={() => setSimilar([])}>إنشاء ملف جديد رغم ذلك</button></div>}{creating && <SmartForm entity="employees" initial={{ name: row.employee_name || row.employee || "", status: "active" }} onDone={async () => { setCreating(false); setToast?.("تم إنشاء ملف الموظف وربطه بنجاح"); close(); }} fields={[["name", "الاسم"], ["phone", "رقم الهاتف"], ["address", "العنوان"], ["job_title", "المسمى الوظيفي"], ["department", "القسم"], ["base_salary", "الراتب الأساسي"], ["hire_date", "تاريخ المباشرة", "date"], ["status", "الحالة", "select", [["active", "فعال"], ["inactive", "غير فعال"]]], ["notes", "الملاحظات"]]} />}</Modal>;
 }
+function AssetCategoryForm({ kind, parentId, categories, onDone }) {
+  const [form, setForm] = useState({ name: '', description: '', icon: '', active: true });
+  const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const save = async (event) => { event.preventDefault(); if (busy) return; setBusy(true); setError(''); try { if (kind === 'subcategory') await api.saveAssetSubcategory({ parent_id: parentId, ...form }); else await api.saveAssetCategory(form); onDone?.(); } catch (e) { setError(e.message); } finally { setBusy(false); } };
+  return <form className="smart-form" onSubmit={save}>{kind === 'subcategory' && <SelectField label="القسم الرئيسي" value={parentId || ''} onChange={() => {}}><option value={parentId}>{categories.find((row) => row.id === parentId)?.name || parentId}</option></SelectField>}<label><span>اسم القسم</span><input required value={form.name} onChange={(e) => setForm((x) => ({ ...x, name: e.target.value }))} /></label><label><span>وصف اختياري</span><textarea value={form.description} onChange={(e) => setForm((x) => ({ ...x, description: e.target.value }))} /></label>{kind !== 'subcategory' && <label><span>أيقونة اختيارية</span><input value={form.icon} onChange={(e) => setForm((x) => ({ ...x, icon: e.target.value }))} /></label>}<label className="check-label"><input type="checkbox" checked={form.active} onChange={(e) => setForm((x) => ({ ...x, active: e.target.checked }))} /><span>فعال</span></label>{error && <div className="error wide">{error}</div>}<button className="primary wide" disabled={busy}>{busy ? 'جارٍ الحفظ...' : 'حفظ القسم'}</button></form>;
+}
+const emptyAssetForm = () => ({ name: '', asset_category_id: 'other', asset_subcategory_id: '', month: currentMonth(), purchase_price: '', notes: '' });
+function AssetForm({ initial = null, categories = [], subcategories = [], categoriesLoading = false, categoriesError = '', onCategoriesChanged, onDone }) {
+  const existingAsset = initial && typeof initial === 'object' && initial.id ? initial : null;
+  const [form, setForm] = useState(() => existingAsset ? { ...emptyAssetForm(), name: existingAsset.name || '', asset_category_id: existingAsset.asset_category_id || assetCategoryIdFromLegacy(existingAsset) || 'other', asset_subcategory_id: existingAsset.asset_subcategory_id || '', month: existingAsset.month || currentMonth(), purchase_price: existingAsset.purchase_price ?? existingAsset.total ?? '', notes: existingAsset.notes || '' } : emptyAssetForm());
+  const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const children = subcategories.filter((row) => row.parent_id === form.asset_category_id && row.active !== false);
+  const addCategory = async () => { const name = window.prompt('اسم قسم الأصول الجديد:'); if (!name?.trim()) return; try { await api.saveAssetCategory({ name }); await onCategoriesChanged?.(); setError('تمت إضافة القسم.'); } catch (e) { setError(e.message); } };
+  const addSubcategory = async () => { const name = window.prompt('اسم القسم الفرعي:'); if (!name?.trim()) return; try { await api.saveAssetSubcategory({ parent_id: form.asset_category_id, name }); await onCategoriesChanged?.(); setError('تمت إضافة القسم الفرعي.'); } catch (e) { setError(e.message); } };
+  const save = async (event) => { event.preventDefault(); if (busy) return; setBusy(true); setError(''); try { const name = String(form.name || '').trim(), amount = Number(form.purchase_price); if (!name) throw new Error('اسم الأصل مطلوب.'); if (!form.asset_category_id) throw new Error('القسم الرئيسي مطلوب.'); if (!Number.isFinite(amount) || amount <= 0) throw new Error('مبلغ الأصل يجب أن يكون أكبر من صفر.'); const category = categories.find((row) => row.id === form.asset_category_id); const payload = { name, asset_category_id: form.asset_category_id, asset_category_name: category?.name || assetCategoryName(form.asset_category_id), asset_subcategory_id: form.asset_subcategory_id || null, asset_subcategory_name: children.find((row) => row.id === form.asset_subcategory_id)?.name || null, category: category?.name || assetCategoryName(form.asset_category_id), accounting_class: 'fixed_asset', status: existingAsset?.status || 'active', month: form.month || null, purchase_price: amount, total: amount, amount, notes: String(form.notes || '').trim() }; if (existingAsset) await api.update('assets', existingAsset.id, payload); else await api.create('assets', payload); onDone?.(); } catch (e) { setError(e.message || 'تعذر حفظ الأصل.'); } finally { setBusy(false); } };
+  return <form className="smart-form" onSubmit={save}>{categoriesLoading && <div className="notice" role="status">جارٍ تحميل أقسام الأصول من Firebase...</div>}{categoriesError && <div className="error wide" role="alert">تعذر تحميل الأقسام المخصصة: {categoriesError}</div>}<label><span>اسم الأصل</span><input required value={form.name} onChange={(e) => setForm((x) => ({ ...x, name: e.target.value }))} /></label><div className="toolbar"><SelectField label="القسم الرئيسي" value={form.asset_category_id} onChange={(v) => setForm((x) => ({ ...x, asset_category_id: v, asset_subcategory_id: '' }))}><option value="">اختر القسم</option>{categories.filter((row) => row && row.active !== false).map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}</SelectField><button type="button" className="secondary" onClick={addCategory}>إضافة قسم جديد</button></div><div className="toolbar"><SelectField label="القسم الفرعي — اختياري" value={form.asset_subcategory_id} onChange={(v) => setForm((x) => ({ ...x, asset_subcategory_id: v }))}><option value="">بدون قسم فرعي</option>{children.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}</SelectField><button type="button" className="secondary" disabled={!form.asset_category_id} onClick={addSubcategory}>إضافة قسم فرعي</button></div><label><span>الشهر</span><input type="month" value={form.month || ''} onChange={(e) => setForm((x) => ({ ...x, month: e.target.value }))} /></label><label><span>المبلغ</span><input required type="number" min="0.01" step="0.01" value={form.purchase_price} onChange={(e) => setForm((x) => ({ ...x, purchase_price: e.target.value }))} /></label><label className="wide"><span>ملاحظات</span><textarea value={form.notes} onChange={(e) => setForm((x) => ({ ...x, notes: e.target.value }))} /></label>{error && <div className="error wide" role="alert">{error}</div>}<button className="primary wide" disabled={busy}>{busy ? 'جارٍ الحفظ...' : existingAsset ? 'تحديث الأصل' : 'حفظ الأصل'}</button></form>;
+}
+function AssetAccordion({ categoryRows, selectedCategory, setSelectedCategory, query, can, setDetail, setManualOpen, setToast, load }) {
+  const [openCategories, setOpenCategories] = useState(new Set());
+  const toggle = (id) => setOpenCategories(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  const filtered = categoryRows.filter(c => c.count > 0 || c.id === selectedCategory);
+  if (!filtered.length) return <Empty text="لا توجد أصول مسجلة بعد" />;
+  return <div className="asset-accordion">
+    {filtered.map(({ id, name, count, total, rows }) => {
+      const isOpen = openCategories.has(id);
+      const filteredRows = query ? rows.filter(r => (r.name || '').toLowerCase().includes(query.toLowerCase())) : rows;
+      return <div className="asset-accordion-item" key={id}>
+        <div className={`asset-accordion-header ${isOpen ? 'open' : ''}`} onClick={() => toggle(id)}>
+          <div className="asset-accordion-left">
+            <span className="asset-accordion-name">{name}</span>
+            <span className="asset-accordion-count">{count} أصل</span>
+          </div>
+          <div style={{display:'flex',alignItems:'center',gap:'12px'}}>
+            <span className="asset-accordion-total">{money(total)}</span>
+            <span className="asset-accordion-chevron" style={{transform:isOpen?'rotate(180deg)':'none',transition:'transform .2s'}}>▼</span>
+          </div>
+        </div>
+        {isOpen && <div className="asset-accordion-body">
+          <DataTable
+            rows={filteredRows.map(row => ({ ...row, value: row.total ?? row.purchase_price ?? 0, month_display: row.month || 'بدون شهر' }))}
+            columns={[["name", "اسم الأصل"], ["value", "المبلغ", money], ["month_display", "الشهر"], ["notes", "ملاحظات", v => v || '—']]}
+            onEdit={can('assets.edit') ? (row) => { setDetail(row); setManualOpen(true); } : undefined}
+          />
+        </div>}
+      </div>;
+    })}
+  </div>;
+}
+
 function Assets(p) {
-  return page(
-    p,
-    "الأصول",
-    "المعدات والأثاث والأجهزة",
-    "assets",
-    [
-      ["name", "الأصل"],
-      ["category", "التصنيف"],
-      ["purchase_date", "تاريخ الشراء"],
-      ["purchase_price", "سعر الشراء", money],
-      ["status", "الحالة"],
-    ],
-    [
-      ["name", "اسم الأصل"],
-      ["category", "التصنيف"],
-      ["purchase_date", "تاريخ الشراء", "date"],
-      ["purchase_price", "سعر الشراء"],
-      ["status", "الحالة"],
-    ],
-    "إضافة أصل",
-  );
+  const { can = () => false, setToast } = p;
+  const [existing, setExisting] = useState([]), [assetCategories, setAssetCategories] = useState(ASSET_CATEGORY_CATALOG.map(([id, name]) => ({ id, name, active: true, source: 'builtin' }))), [subcategories, setSubcategories] = useState([]), [preview, setPreview] = useState(null), [selectedCategory, setSelectedCategory] = useState("all"), [query, setQuery] = useState(""), [detail, setDetail] = useState(null), [manualOpen, setManualOpen] = useState(false), [categoryModal, setCategoryModal] = useState(null), [busy, setBusy] = useState(false), [categoriesLoading, setCategoriesLoading] = useState(true), [categoriesError, setCategoriesError] = useState('');
+  const load = () => api.list("assets").then((rows) => setExisting(rows.filter((row) => row.deleted !== true && !['classified_elsewhere', 'inactive', 'archived'].includes(row.status)))).catch((error) => setToast?.(userFacingError(error)));
+  const loadCategories = async () => { setCategoriesLoading(true); setCategoriesError(''); try { const [custom, children] = await Promise.all([api.listAssetCategories(), api.listAssetSubcategories()]); const builtins = ASSET_CATEGORY_CATALOG.map(([id, name]) => ({ id, name, active: true, source: 'builtin' })); const merged = [...builtins]; (custom || []).filter(Boolean).forEach((row) => { const index = merged.findIndex((item) => item.id === row.id); if (index >= 0) merged[index] = { ...merged[index], ...row }; else merged.push(row); }); setAssetCategories(merged); setSubcategories((children || []).filter(Boolean)); } catch (error) { const message = userFacingError(error); setCategoriesError(message); setToast?.(message); } finally { setCategoriesLoading(false); } };
+  useEffect(() => { load(); loadCategories(); }, []);
+  useNewAction('assets', () => setManualOpen(true));
+  const readFile = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setBusy(true);
+    try {
+      const workbook = XLSX.read(await file.arrayBuffer(), { cellDates: true, cellFormula: true });
+      const rows = parseAssetWorkbook(workbook, file.name);
+      const existingKeys = new Set(existing.map((row) => row.import_key).filter(Boolean));
+      const duplicateNames = new Set(existing.map((row) => normalizeAssetText(row.name)).filter(Boolean));
+      const next = rows.map((row) => ({ ...row, duplicate: existingKeys.has(row.import_key) || duplicateNames.has(normalizeAssetText(row.name)) }));
+      const byCategory = ASSET_CATEGORY_CATALOG.map(([id, name]) => { const items = next.filter((row) => assetCategoryIdFromLegacy(row) === id); return { id, category: name, count: items.length, total: items.reduce((sum, row) => sum + Number(row.total || 0), 0) }; }).filter((row) => row.count || row.id !== "other");
+      setPreview({ filename: file.name, sheets: workbook.SheetNames.map((sheet) => ({ name: sheet, rows: XLSX.utils.sheet_to_json(workbook.Sheets[sheet], { header: 1, defval: null, raw: true }).filter((row) => row.some((value) => value !== null && value !== "")).length })), rows: next, byCategory });
+      setSelectedCategory("all");
+      setToast?.(`تمت معاينة ${next.length} بندًا — لم تُكتب أي بيانات`);
+    } catch (error) {
+      setToast?.(`تعذر قراءة المصنف: ${error.message || error}`);
+    } finally {
+      setBusy(false);
+      event.target.value = "";
+    }
+  };
+  const updatePreviewRow = (patch) => {
+    if (!detail || !preview) return;
+    setPreview((current) => ({ ...current, rows: current.rows.map((row) => row.import_key === detail.import_key ? { ...row, ...patch } : row) }));
+    setDetail((current) => current ? { ...current, ...patch } : current);
+  };
+  const importPreview = async () => {
+    if (!preview?.rows?.length) return;
+    setBusy(true);
+    try {
+      const result = await api.importAssetBatch({ filename: preview.filename, sheet: "ورقة1", rows: preview.rows });
+      setToast?.(`تم تجهيز الدفعة على البيئة الحالية: ${result.inserted_rows} جديد، ${result.skipped_rows} مكرر، ${result.invalid_rows} غير صالح`);
+      setPreview(null);
+      await load();
+    } catch (error) {
+      setToast?.(userFacingError(error, "تعذر استيراد دفعة الأصول."));
+    } finally {
+      setBusy(false);
+    }
+  };
+   const previewRows = (preview?.rows || []).filter((row) => (selectedCategory === "all" || assetCategoryIdFromLegacy(row) === selectedCategory) && (!query || normalizeAssetText(`${row.name} ${row.notes}`).includes(normalizeAssetText(query))));
+   const importedAssetTotal = existing.reduce((sum, row) => sum + Number(row.total ?? row.purchase_price ?? 0), 0);
+   const previewTotal = (preview?.rows || []).reduce((sum, row) => sum + Number(row.total || 0), 0), fixedTotal = (preview?.rows || []).filter((row) => row.accounting_class === "fixed_asset").reduce((sum, row) => sum + Number(row.total || 0), 0), setupTotal = (preview?.rows || []).filter((row) => row.accounting_class !== "fixed_asset").reduce((sum, row) => sum + Number(row.total || 0), 0);
+  const mismatches = (preview?.rows || []).filter((row) => row.total_mismatch), duplicates = (preview?.rows || []).filter((row) => row.duplicate);
+  const categoryRows = assetCategories.map(({ id, name }) => { const rows = existing.filter((row) => assetCategoryIdFromLegacy(row) === id); return { id, name, count: rows.length, total: rows.reduce((sum, row) => sum + Number(row.total ?? row.purchase_price ?? 0), 0), rows }; });
+  const saveDetail = async (event) => { event.preventDefault(); if (!detail?.id || !can('assets.edit')) return; const form = new FormData(event.currentTarget); try { await api.update('assets', detail.id, { name: String(form.get('name') || '').trim(), asset_category_id: String(form.get('asset_category_id') || 'other'), category: assetCategoryName(String(form.get('asset_category_id') || 'other')), month: form.get('month') || null, notes: String(form.get('notes') || '').trim() }); setDetail(null); await load(); setToast?.('تم حفظ الأصل وتحديث القسم والمجاميع.'); } catch (error) { setToast?.(userFacingError(error)); } };
+
+  return <div className="screen-stack">
+    <Panel title="قسم الأصول" action="الأصول النشطة — مجمّعة حسب الفئة">
+       {/* KPI Summary */}
+       <div className="report-summary-grid" style={{gridTemplateColumns:'repeat(4,1fr)',marginBottom:'20px'}}>
+         {[['إجمالي قيمة الأصول', importedAssetTotal, true], ['عدد الأصول النشطة', existing.length, false], ['عدد الفئات المستخدمة', categoryRows.filter((row) => row.count > 0).length, false], ['تحتاج استكمال بيانات', existing.filter((row) => !row.month || !row.asset_category_id).length, false]].map(([label, value, isMoney]) => <div className="report-summary-card" key={label}><span>{label}</span><strong>{isMoney ? money(value) : Number(value).toLocaleString('ar-IQ')}</strong></div>)}
+       </div>
+
+       {/* Toolbar */}
+       <div className="toolbar">
+         <div className="table-search"><Search size={17} /><input placeholder="بحث باسم الأصل..." value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+         <label className="secondary file-button"><FileSpreadsheet size={17} /> {busy ? 'جارٍ القراءة...' : 'معاينة ملف Excel'}<input type="file" accept=".xlsx,.xls" onChange={readFile} disabled={busy} /></label>
+       {can('assets.create') && <><button className="secondary" onClick={() => setCategoryModal({ kind: 'category' })}>إضافة قسم</button><button className="primary" onClick={() => { setDetail(null); setManualOpen(true); }}><Plus size={17} /> إضافة أصل</button></>}
+       </div>
+
+       {/* Accordion categories or preview */}
+       {!preview && <AssetAccordion categoryRows={categoryRows} selectedCategory={selectedCategory} setSelectedCategory={setSelectedCategory} query={query} can={can} setDetail={setDetail} setManualOpen={setManualOpen} setToast={setToast} load={load} />}
+
+       {preview && <>
+          <div className="report-summary-grid"><div className="report-summary-card"><span>معاينة الملف — عدد البنود</span><strong>{preview.rows.length.toLocaleString('ar-IQ')}</strong></div><div className="report-summary-card"><span>معاينة الملف — الإجمالي</span><strong>{money(previewTotal)}</strong></div><div className="report-summary-card"><span>معاينة الملف — الأصول الثابتة</span><strong>{money(fixedTotal)}</strong></div><div className="report-summary-card"><span>معاينة الملف — التأسيس والمواد</span><strong>{money(setupTotal)}</strong></div></div>
+          {mismatches.length > 0 && <div className="duplicate-warning"><strong>مطابقة المجاميع تحتاج مراجعة</strong><span>{mismatches.map((row) => `${row.source_sheet}:${row.source_row} «${row.name}»: المسجل ${money(row.total)} مقابل إعادة الحساب ${money(row.recalculated_total)}`).join(' · ')}</span></div>}
+          {duplicates.length > 0 && <div className="duplicate-warning"><strong>تكرارات محتملة: {duplicates.length}</strong><span>ستبقى منفصلة ولن تُدمج أو تُحذف تلقائيًا.</span></div>}
+          <DataTable rows={previewRows.map((row) => ({ ...row, category_display: assetCategoryName(assetCategoryIdFromLegacy(row)), accounting_display: assetAccountingLabel(row.accounting_class) }))} columns={[["name", "البند"],["category_display", "القسم"],["quantity", "الكمية", (value) => value == null ? '—' : value],["total", "الإجمالي", money],["accounting_display", "التصنيف المحاسبي"],["source_row", "المصدر", (value, row) => `${row.source_sheet}:${value}`]]} rowActions={(row) => <button className="table-action" onClick={() => {}}>التفاصيل</button>} />
+          {localQa && <button className="primary" disabled={busy || !can('excel.import')} onClick={importPreview}>تأكيد دفعة الأصول على Emulator</button>}
+          <button className="secondary" onClick={() => setPreview(null)}>إلغاء المعاينة</button>
+       </>}
+    </Panel>
+    {manualOpen && <Modal title={detail?.id ? 'تعديل أصل' : 'إضافة أصل'} onClose={() => { setManualOpen(false); setDetail(null); }}><AssetForm initial={detail?.id ? detail : null} categories={assetCategories} subcategories={subcategories} categoriesLoading={categoriesLoading} categoriesError={categoriesError} onCategoriesChanged={loadCategories} onDone={async () => { setManualOpen(false); setDetail(null); await load(); setToast?.('تم حفظ الأصل وتحديث المجاميع.'); }} /></Modal>}
+    {categoryModal && <Modal title={categoryModal.kind === 'subcategory' ? 'إضافة قسم فرعي للأصول' : 'إضافة قسم جديد للأصول'} onClose={() => setCategoryModal(null)}><AssetCategoryForm kind={categoryModal.kind} parentId={categoryModal.parentId} categories={assetCategories} onDone={async () => { setCategoryModal(null); await loadCategories(); setToast?.('تم حفظ تصنيف الأصول.'); }} /></Modal>}
+    {detail && !manualOpen && <Modal title={`تعديل الأصل — ${detail.name || '—'}`} onClose={() => setDetail(null)}><form className="smart-form" onSubmit={saveDetail}><label><span>اسم الأصل</span><input name="name" required defaultValue={detail.name || ''} /></label><label><span>القسم</span><select name="asset_category_id" defaultValue={assetCategoryIdFromLegacy(detail)}>{ASSET_CATEGORY_CATALOG.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label><label><span>الشهر</span><input name="month" type="month" defaultValue={detail.month || ''} /></label><label className="wide"><span>ملاحظات</span><textarea name="notes" defaultValue={detail.notes || ''} /></label><div className="notice">المبلغ والمصدر محفوظان؛ تغيير القسم لا ينشئ أصلًا جديدًا.</div><button className="primary wide">حفظ وتحديث المجاميع</button></form></Modal>}
+  </div>;
+}
+function HistoricalImportsLegacy({ setToast, can = () => false }) {
+  const [rows, setRows] = useState([]); const [summary, setSummary] = useState(null); const [preview, setPreview] = useState(null); const [selected, setSelected] = useState(new Set()); const [month, setMonth] = useState(''); const [viewMonth, setViewMonth] = useState('all'); const [query, setQuery] = useState(''); const [busy, setBusy] = useState(false); const [filter, setFilter] = useState('all');
+  const load = async () => { try { const data = await api.historicalImportSummary(); setRows(data.rows); setSummary(data.totals); } catch (e) { setToast?.(userFacingError(e)); } };
+  useEffect(() => { let active = true; (async () => { try { const classification = await api.repairHistoricalClassificationState(); if (active && classification.repaired) setToast?.(`تمت مزامنة حالة مراجعة التصنيف لـ ${classification.repaired} بندًا.`); } catch { /* read-only viewers may not manage state */ } try { const result = await api.repairHistoricalAssets(); if (active && result.repaired) setToast?.(`تمت مطابقة ${result.repaired} رابطًا تاريخيًا مع سجل الأصول.`); } catch { /* read-only viewers may not manage links */ } if (active) await load(); })(); return () => { active = false; }; }, []);
+  const read = async (event) => { const file = event.target.files?.[0]; if (!file) return; setBusy(true); try { const wb = XLSX.read(await file.arrayBuffer(), { cellDates: true, cellFormula: true }); const parsed = parseHistoricalWorkbook(wb, file.name); const current = rows; setPreview({ filename: file.name, rows: markPotentialDuplicates(parsed, current), sheets: wb.SheetNames }); setToast?.(`تمت معاينة ${parsed.length} بندًا من ${file.name} دون كتابة.`); } catch (e) { setToast?.(`تعذر قراءة الملف: ${e.message || e}`); } finally { setBusy(false); event.target.value = ''; } };
+  const toggle = (id) => setSelected((old) => { const next = new Set(old); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  const updateMany = async () => { if (!month || !selected.size) return; setBusy(true); try { for (const id of selected) await api.updateHistoricalImport(id, { month }); setSelected(new Set()); setMonth(''); await load(); setToast?.('تم نقل البنود المحددة إلى الشهر مرة واحدة لكل سجل.'); } catch (e) { setToast?.(userFacingError(e)); } finally { setBusy(false); } };
+  const importFile = async () => { if (!preview?.rows?.length) return; setBusy(true); try { const result = await api.importHistoricalBatch({ filename: preview.filename, rows: preview.rows }); setPreview(null); await load(); setToast?.(`تم الاستيراد: ${result.inserted_rows} جديد، ${result.skipped_rows} موجود مسبقًا، ${result.invalid_rows} غير صالح.`); } catch (e) { setToast?.(userFacingError(e)); } finally { setBusy(false); } };
+  const updateRow = async (row, patch) => { try { await api.updateHistoricalImport(row.id, patch); await load(); } catch (e) { setToast?.(userFacingError(e)); } };
+  const visible = filterHistoricalRows({ rows, filter, month: viewMonth, query });
+  const visibleTotals = summarizeHistoricalRows(visible);
+  const monthOptions = historicalMonthOptions(rows);
+  const cards = summary ? [['عدد البنود المستوردة', summary.importedCount], ['إجمالي قيمة المستورد', summary.importedValue], ['الأصول الثابتة المصنّفة', summary.fixedAssetValue], ['التأسيس والمواد المصنّفة', summary.setupMaterialsValue], ['بدون شهر', `${summary.withoutMonthCount.toLocaleString('ar-IQ')} · ${money(summary.withoutMonthValue)}`], ['التكرارات المعلّقة', `${summary.suspectedCount.toLocaleString('ar-IQ')} · ${money(summary.suspectedValue)}`]] : [];
+
+  return <div className="screen-stack"><Panel title="الاستيراد التاريخي وإدارة بدون شهر" action="المصدر محفوظ: الملف · الورقة · الصف"><div className="report-summary-grid">{cards.map(([label, value]) => <div className="report-summary-card" key={label}><span>{label}</span><strong>{typeof value === "number" && label.includes("عدد") ? value.toLocaleString("ar-IQ") : typeof value === "number" ? money(value) : value}</strong></div>)}</div><div className="toolbar"><div className="table-search"><Search size={17} /><input placeholder="بحث في البنود..." value={query} onChange={(e) => setQuery(e.target.value)} /></div><label className="secondary file-button"><FileSpreadsheet size={17} /> {busy ? "جارٍ العمل..." : "معاينة ملف XLSX"}<input type="file" accept=".xlsx,.xls" onChange={read} disabled={busy || !can("excel.import")} /></label>{monthSelect(viewMonth, setViewMonth, "شهر العرض: كل البنود")} {monthSelect(assignMonth, setAssignMonth, "شهر التعيين للبنود المحددة", true)}<button className="primary" disabled={busy || !assignMonth || !selected.size || !can("excel.import")} onClick={updateMany}>تعيين الشهر للمحدد ({selected.size})</button></div><div className="report-summary-grid"><div className="report-summary-card"><span>البنود المعروضة حسب الفلتر</span><strong>{visible.length.toLocaleString("ar-IQ")}</strong></div><div className="report-summary-card"><span>قيمة العرض دون احتساب التكرار المعلّق</span><strong>{money(visibleTotals.importedValue)}</strong></div></div><div className="filter-pills"><button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>كل البنود ({rows.length})</button><button className={filter === "withoutMonth" ? "active" : ""} onClick={() => setFilter("withoutMonth")}>بدون شهر ({summary?.withoutMonthCount || 0})</button><button className={filter === "review" ? "active" : ""} onClick={() => setFilter("review")}>يحتاج مراجعة ({rows.filter((r) => isClassificationReview(r)).length})</button><button className={filter === "suspected" ? "active" : ""} onClick={() => setFilter("suspected")}>التكرارات المعلّقة ({summary?.suspectedCount || 0})</button></div>{visible.length ? <DataTable rows={visible} columns={HISTORICAL_COLUMNS} rowActions={rowAction} /> : <Empty text="لا توجد بنود في هذا القسم" />}</Panel>{preview && <Panel title={`معاينة ${preview.filename}`} action={`${preview.sheets.join(" · ")} · ${preview.rows.length} بند`}><div className="notice"><strong>لن يتوقف الاستيراد بسبب تاريخ أو تصنيف ناقص.</strong><span>سيُحفظ كل بند، ويظهر بلا شهر أو بعلامة يحتاج مراجعة حسب بياناته.</span></div><DataTable rows={preview.rows.slice(0, 100)} columns={HISTORICAL_PREVIEW_COLUMNS} /><button className="primary" disabled={busy || !can("excel.import")} onClick={importFile}>تأكيد استيراد كل البنود</button><button className="secondary" onClick={() => setPreview(null)}>إلغاء المعاينة</button></Panel>}</div>;
+}
+const HISTORICAL_COLUMNS = [["name", "البند"], ["description", "الوصف الأصلي"], ["amount", "القيمة", money], ["transaction_date", "تاريخ العملية", (v) => v || "غير موثق"], ["accounting_month", "الشهر المحاسبي", (v) => v || "بدون شهر"], ["month_source", "مصدر الشهر"], ["proposed_category", "التصنيف المقترح"], ["source_filename", "الملف"], ["source_row", "الصف"], ["duplicate_status", "التكرار", (v) => v === "clear" ? "سليم" : v === "suspected" ? "مشتبه" : "موجود مسبقًا"]];
+const HISTORICAL_PREVIEW_COLUMNS = [["name", "البند"], ["amount", "القيمة", money], ["date", "التاريخ", (v) => v || "بدون شهر"], ["proposed_category", "التصنيف"], ["source_sheet", "الورقة"], ["source_row", "الصف"]];
+const HISTORICAL_CLASS_OPTIONS = [['review', 'يحتاج مراجعة'], ['fixed_asset', 'أصل ثابت'], ['expense', 'مصروف'], ['purchase', 'مشتريات'], ['setup_cost', 'تكاليف تأسيس']];
+const HISTORICAL_SUBCATEGORIES = { fixed_asset: ASSET_CATEGORY_CATALOG.map(([, label]) => label), expense: ['تشغيل', 'إيجار', 'خدمات', 'نقل', 'أخرى'], purchase: ['مواد أولية', 'مستلزمات', 'مشتريات عامة', 'أخرى'], setup_cost: ['تكاليف تأسيس', 'تصميم وتجهيز', 'رسوم وترخيص', 'أخرى'], review: [] };
+const historicalClassLabel = (value) => HISTORICAL_CLASS_OPTIONS.find(([key]) => key === value)?.[1] || value || '—';
+function HistoricalEditForm({ row, busy, onPreview }) {
+  const [accountingClass, setAccountingClass] = useState(row.accounting_class || 'review');
+  const [categoryId, setCategoryId] = useState(row.asset_category_id || assetCategoryIdFromLegacy(row));
+  const [categories, setCategories] = useState(ASSET_CATEGORY_CATALOG.map(([id, name]) => ({ id, name })));
+  useEffect(() => { api.listAssetCategories().then((custom) => { const merged = [...ASSET_CATEGORY_CATALOG.map(([id, name]) => ({ id, name }))]; custom.forEach((item) => { const index = merged.findIndex((row) => row.id === item.id); if (index >= 0) merged[index] = { ...merged[index], ...item }; else merged.push(item); }); setCategories(merged); }).catch(() => {}); }, []);
+  const submit = (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); onPreview({ month: form.get('month') || null, accounting_class: accountingClass, proposed_category: accountingClass === 'fixed_asset' ? assetCategoryName(categoryId) : form.get('proposed_category') || '', asset_category_id: accountingClass === 'fixed_asset' ? categoryId : null, notes: form.get('notes') || '' }); };
+  return <form className="smart-form" onSubmit={submit}><label><span>الوصف الأصلي</span><textarea readOnly value={row.description || row.name || ''} /></label><label><span>المبلغ</span><input readOnly value={money(row.amount)} /></label><label><span>الملف والورقة ورقم الصف</span><input readOnly value={`${row.source_filename || '—'} · ${row.source_sheet || '—'}:${row.source_row || '—'}`} /></label><label><span>الشهر الحالي: {row.month || 'بدون شهر'}</span><input name="month" type="month" defaultValue={row.month || ''} /></label><label><span>التصنيف المحاسبي</span><select value={accountingClass} onChange={(event) => setAccountingClass(event.target.value)}>{HISTORICAL_CLASS_OPTIONS.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>{accountingClass === 'fixed_asset' ? <label><span>قسم الأصل</span><select name="asset_category_id" value={categoryId} onChange={(event) => setCategoryId(event.target.value)}>{categories.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label> : accountingClass !== 'review' ? <label><span>القسم الفرعي</span><select name="proposed_category" defaultValue={row.proposed_category || ''}><option value="">اختر قسمًا فرعيًا</option>{(HISTORICAL_SUBCATEGORIES[accountingClass] || []).map((item) => <option key={item} value={item}>{item}</option>)}</select></label> : null}<label className="wide"><span>ملاحظات اختيارية</span><textarea name="notes" defaultValue={row.notes || ''} /></label><button className="primary wide" disabled={busy}>معاينة «حفظ ونقل»</button></form>;
+}
+
+function HistoricalImports({ setToast, can = () => false }) {
+  const [rows, setRows] = useState([]), [summary, setSummary] = useState(null), [preview, setPreview] = useState(null), [selected, setSelected] = useState(new Set()), [viewMonth, setViewMonth] = useState('all'), [filter, setFilter] = useState('all'), [query, setQuery] = useState(''), [busy, setBusy] = useState(false), [loadState, setLoadState] = useState('loading'), [loadError, setLoadError] = useState(''), [editRow, setEditRow] = useState(null), [individualPreview, setIndividualPreview] = useState(null), [bulkMode, setBulkMode] = useState(null), [bulkForm, setBulkForm] = useState({ month: '', accounting_class: '', proposed_category: '', notes: '' }), [bulkPreview, setBulkPreview] = useState(null), [result, setResult] = useState(null), [assetCategories, setAssetCategories] = useState(ASSET_CATEGORY_CATALOG.map(([id, name]) => ({ id, name })));
+  const loadRequest = useRef(0);
+  const load = async () => { const request = ++loadRequest.current; setLoadState('loading'); setLoadError(''); try { const data = await api.historicalImportSummary(); if (request !== loadRequest.current) return false; setRows(data.rows); setSummary(data.totals); setLoadState('ready'); return true; } catch (e) { if (request !== loadRequest.current) return false; setLoadError(userFacingError(e)); setLoadState('error'); return false; } };
+  useEffect(() => { load(); api.listAssetCategories().then((custom) => { const merged = [...ASSET_CATEGORY_CATALOG.map(([id, name]) => ({ id, name }))]; (custom || []).filter(Boolean).forEach((item) => { const index = merged.findIndex((row) => row.id === item.id); if (index >= 0) merged[index] = { ...merged[index], ...item }; else merged.push(item); }); setAssetCategories(merged); }).catch((error) => setToast?.(`تعذر تحميل أقسام الأصول للتاريخ: ${userFacingError(error)}`)); return () => { loadRequest.current += 1; }; }, []);
+  const monthOptions = historicalMonthOptions(rows), visible = filterHistoricalRows({ rows, filter, month: viewMonth, query }), selectableVisible = visible.filter((row) => !['suspected', 'existing'].includes(row.duplicate_status)), selectedRows = rows.filter((row) => selected.has(row.id)), allVisibleSelected = selectableVisible.length > 0 && selectableVisible.every((row) => selected.has(row.id)), visibleTotals = summarizeHistoricalRows(visible);
+  const toggle = (id) => setSelected((old) => { const next = new Set(old); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  const toggleAllVisible = (checked) => setSelected((old) => { const next = new Set(old); selectableVisible.forEach((row) => checked ? next.add(row.id) : next.delete(row.id)); return next; });
+  const read = async (event) => { const file = event.target.files?.[0]; if (!file) return; setBusy(true); try { const wb = XLSX.read(await file.arrayBuffer(), { cellDates: true, cellFormula: true }); const parsed = parseHistoricalWorkbook(wb, file.name); setPreview({ filename: file.name, rows: markPotentialDuplicates(parsed, rows), sheets: wb.SheetNames }); setToast?.(`تمت معاينة ${parsed.length} بندًا من ${file.name} دون كتابة.`); } catch (e) { setToast?.(`تعذر قراءة الملف: ${e.message || e}`); } finally { setBusy(false); event.target.value = ''; } };
+  const importFile = async () => { if (!preview?.rows?.length) return; setBusy(true); try { const data = await api.importHistoricalBatch({ filename: preview.filename, rows: preview.rows }); setPreview(null); await load(); setToast?.(`تم الاستيراد: ${data.inserted_rows} جديد، ${data.skipped_rows} موجود مسبقًا، ${data.invalid_rows} غير صالح.`); } catch (e) { setToast?.(userFacingError(e)); } finally { setBusy(false); } };
+  const executeUpdates = async (items) => { setBusy(true); const succeeded = [], failed = []; try { for (const item of items) { try { await api.updateHistoricalImport(item.row.id, item.patch); succeeded.push({ row: item.row, patch: item.patch }); } catch (error) { failed.push({ row: item.row, reason: userFacingError(error) }); } } await load(); setSelected((old) => { const next = new Set(old); succeeded.forEach(({ row }) => next.delete(row.id)); return next; }); setResult({ succeeded, failed }); return { succeeded, failed }; } finally { setBusy(false); } };
+  const submitIndividual = (eventOrPatch) => {
+    if (eventOrPatch?.preventDefault) { eventOrPatch.preventDefault(); const form = new FormData(eventOrPatch.currentTarget); const proposedCategory = String(form.get('proposed_category') || ''); const assetCategoryId = assetCategories.find((item) => item.name === proposedCategory)?.id || null; setIndividualPreview({ row: editRow, patch: { month: form.get('month') || null, accounting_class: form.get('accounting_class') || 'review', proposed_category: proposedCategory, asset_category_id: assetCategoryId, notes: form.get('notes') || '' } }); }
+    else setIndividualPreview({ row: editRow, patch: eventOrPatch });
+  };
+  const confirmIndividual = async () => { const done = await executeUpdates([{ row: individualPreview.row, patch: individualPreview.patch }]); setIndividualPreview(null); setEditRow(null); setToast?.(done.failed.length ? `تم حفظ ${done.succeeded.length} بندًا وفشل ${done.failed.length}.` : 'تم حفظ البند وتحديث وجهته.'); };
+  const closeBulk = () => { setBulkMode(null); setBulkPreview(null); setBulkForm({ month: '', accounting_class: '', proposed_category: '', notes: '' }); };
+  const prepareBulk = (event) => { event.preventDefault(); const patch = {}; if (bulkMode !== 'class') { if (!bulkForm.month) return setToast?.('اختر الشهر صراحةً قبل المعاينة.'); patch.month = bulkForm.month; } if (bulkMode !== 'month') { if (!bulkForm.accounting_class) return setToast?.('اختر التصنيف صراحةً قبل المعاينة.'); patch.accounting_class = bulkForm.accounting_class; patch.proposed_category = bulkForm.proposed_category; } if (bulkForm.notes) patch.notes = bulkForm.notes; setBulkPreview({ rows: selectedRows, patch }); };
+  const confirmBulk = async () => { const done = await executeUpdates((bulkPreview?.rows || []).map((row) => ({ row, patch: bulkPreview.patch }))); closeBulk(); setToast?.(done.failed.length ? `تم حفظ ${done.succeeded.length} بندًا وفشل ${done.failed.length}.` : `تم حفظ ونقل ${done.succeeded.length} بندًا.`); };
+  const monthSelect = (value, onChange, label, assignment = false) => <select aria-label={label} value={value} onChange={(e) => onChange(e.target.value)}><option value={assignment ? '' : 'all'}>{label}</option>{!assignment && <option value="withoutMonth">بدون شهر</option>}{monthOptions.map((item) => <option key={item} value={item}>{item}</option>)}</select>;
+  const rowActions = (row) => <button className="table-action" disabled={busy || !can('excel.import')} onClick={() => setEditRow(row)}>تعديل</button>;
+  const columns = [['__select', <label><input type="checkbox" aria-label="تحديد الكل للنتائج الظاهرة" checked={allVisibleSelected} onChange={(event) => toggleAllVisible(event.target.checked)} /> تحديد الكل للنتائج الظاهرة</label>, (_, row) => <input type="checkbox" aria-label={`تحديد ${row.name || 'البند'}`} checked={selected.has(row.id)} disabled={['suspected', 'existing'].includes(row.duplicate_status)} onChange={() => toggle(row.id)} />], ['name', 'البند'], ['description', 'الوصف الأصلي'], ['amount', 'المبلغ', money], ['month', 'الشهر المحاسبي', (value) => value || 'بدون شهر'], ['accounting_class', 'التصنيف', (value) => historicalClassLabel(value)], ['proposed_category', 'القسم الفرعي', (value) => value || '—'], ['source_filename', 'المصدر', (value, row) => `${value || '—'} · ${row.source_sheet || '—'}:${row.source_row || '—'}`], ['duplicate_status', 'مراجعة التكرار', (value) => value === 'clear' ? 'سليم' : value === 'suspected' ? 'مشتبه' : 'موجود مسبقًا']];
+  if (loadState === 'loading') return <div className="screen-stack"><Panel title="الاستيراد التاريخي وإدارة بدون شهر"><LoadingBlock /><div className="loading-message">جاري تحميل البنود...</div></Panel></div>;
+  if (loadState === 'error') return <div className="screen-stack"><Panel title="الاستيراد التاريخي وإدارة بدون شهر"><div className="error" role="alert">تعذر تحميل البنود: {loadError}</div><button className="primary" onClick={load}>إعادة المحاولة</button></Panel></div>;
+  const classifiedCount = rows.filter((row) => !isClassificationReview(row) && row.accounting_class && row.accounting_class !== 'review').length;
+  const reviewCount = rows.filter((row) => isClassificationReview(row) || !row.accounting_class || row.accounting_class === 'review').length;
+  const cards = [
+    ['عدد البنود', summary?.importedCount || rows.length, false],
+    ['إجمالي المبلغ', summary?.importedValue || rows.reduce((s, r) => s + Number(r.amount || 0), 0), true],
+    ['البنود المصنفة', classifiedCount, false],
+    ['تحتاج مراجعة', reviewCount, false, true]
+  ];
+  const categoryOptions = [...new Set([...assetCategories.map((item) => item.name), ...Object.values(HISTORICAL_SUBCATEGORIES).flat()])];
+  return <div className="screen-stack">
+    <Panel title="الاستيراد التاريخي" action="ملخص البنود المستوردة وأدوات النقل والتصنيف">
+      <div className="hi-summary-grid">
+        {cards.map(([label, value, isMoney, isReview]) => (
+          <div className={`hi-summary-card ${isReview ? 'review' : ''}`} key={label}>
+            <span>{label}</span>
+            <strong style={isReview && value > 0 ? {color: '#9a6418'} : {}}>
+              {isMoney ? money(value) : Number(value).toLocaleString('ar-IQ')}
+            </strong>
+          </div>
+        ))}
+      </div>
+      <div className="toolbar">
+        <div className="table-search"><Search size={17} /><input placeholder="بحث في البنود..." value={query} onChange={(e) => setQuery(e.target.value)} disabled={busy} /></div>
+        <label className="secondary file-button"><FileSpreadsheet size={17} /> معاينة ملف XLSX<input type="file" accept=".xlsx,.xls" onChange={read} disabled={busy || !can('excel.import')} /></label>
+        {monthSelect(viewMonth, setViewMonth, 'شهر العرض: الكل')}
+        {selectedRows.length > 0 && <>
+          <button className="secondary" disabled={busy} onClick={() => setSelected(new Set())}>إلغاء التحديد</button>
+          <button className="secondary" disabled={busy} onClick={() => setBulkMode('month')}>تعيين شهر ({selectedRows.length})</button>
+          <button className="secondary" disabled={busy} onClick={() => setBulkMode('class')}>تعيين تصنيف ({selectedRows.length})</button>
+          <button className="primary" disabled={busy || !can('excel.import')} onClick={() => setBulkMode('both')}>حفظ ونقل المحدد ({selectedRows.length})</button>
+        </>}
+      </div>
+      <div className="filter-pills">
+        <button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>كل البنود ({rows.length})</button>
+        <button className={filter === 'withoutMonth' ? 'active' : ''} onClick={() => setFilter('withoutMonth')}>بدون شهر ({summary?.withoutMonthCount || 0})</button>
+        <button className={filter === 'review' ? 'active' : ''} onClick={() => setFilter('review')}>يحتاج مراجعة ({reviewCount})</button>
+        <button className={filter === 'suspected' ? 'active' : ''} onClick={() => setFilter('suspected')}>تكرار محتمل ({summary?.suspectedCount || 0})</button>
+      </div>
+      {visible.length ? <DataTable rows={visible} columns={columns} rowActions={rowActions} /> : <Empty text="لا توجد بنود في هذا القسم" />}
+    </Panel>{preview && <Panel title={`معاينة ${preview.filename}`} action={`${preview.sheets.join(' · ')} · ${preview.rows.length} بند`}><div className="notice"><strong>لن يتوقف الاستيراد بسبب تاريخ أو تصنيف ناقص.</strong><span>سيُحفظ كل بند، ويظهر بلا شهر أو بعلامة يحتاج مراجعة حسب بياناته.</span></div><DataTable rows={preview.rows.slice(0, 100)} columns={[['name', 'البند'], ['amount', 'القيمة', money], ['date', 'التاريخ', (v) => v || 'بدون شهر'], ['proposed_category', 'التصنيف']]} /><button className="primary" disabled={busy || !can('excel.import')} onClick={importFile}>تأكيد استيراد كل البنود</button><button className="secondary" onClick={() => setPreview(null)}>إلغاء المعاينة</button></Panel>}{result && <Panel title="نتيجة آخر حفظ جماعي"><div className={result.failed.length ? 'duplicate-warning' : 'notice'}><strong>نجح {result.succeeded.length} · فشل {result.failed.length}</strong>{result.failed.map(({ row, reason }) => <div key={row.id}>{row.name || row.id}: {reason}</div>)}<small>تم الاحتفاظ بالنجاحات، ولم تتغير علامة مراجعة التكرار.</small></div></Panel>}{editRow && <Modal title={`تعديل ونقل — ${editRow.name || 'بند تاريخي'}`} onClose={() => setEditRow(null)}><form className="smart-form" onSubmit={submitIndividual}><label><span>الوصف الأصلي</span><textarea readOnly value={editRow.description || editRow.name || ''} /></label><label><span>المبلغ</span><input readOnly value={money(editRow.amount)} /></label><label><span>المصدر</span><input readOnly value={`${editRow.source_filename || '—'} · ${editRow.source_sheet || '—'}:${editRow.source_row || '—'}`} /></label><label><span>الشهر الحالي: {editRow.month || 'بدون شهر'}</span><input name="month" type="month" defaultValue={editRow.month || ''} /></label><label><span>التصنيف الحالي: {historicalClassLabel(editRow.accounting_class)}</span><select name="accounting_class" defaultValue={editRow.accounting_class || 'review'}>{HISTORICAL_CLASS_OPTIONS.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>القسم الفرعي</span><select name="proposed_category" defaultValue={editRow.proposed_category || ''}><option value="">اختر قسمًا فرعيًا</option>{categoryOptions.map((item) => <option key={item} value={item}>{item}</option>)}{editRow.proposed_category && !categoryOptions.includes(editRow.proposed_category) && <option value={editRow.proposed_category}>{editRow.proposed_category}</option>}</select></label><label><span>ملاحظات اختيارية</span><textarea name="notes" defaultValue={editRow.notes || ''} /></label><button className="primary wide" disabled={busy}>معاينة «حفظ ونقل»</button></form></Modal>}{individualPreview && <Modal title="معاينة التعديل الفردي" onClose={() => setIndividualPreview(null)}><div className="notice"><strong>سيتم تعديل بند واحد: {individualPreview.row.name}</strong><span>الشهر: {individualPreview.patch.month || 'بدون شهر'} · التصنيف: {historicalClassLabel(individualPreview.patch.accounting_class)} · القسم: {individualPreview.patch.proposed_category || '—'}</span></div><button className="primary wide" disabled={busy} onClick={confirmIndividual}>تأكيد الحفظ والنقل</button></Modal>}{bulkMode && <Modal title="إجراءات البنود المحددة" onClose={closeBulk}><form className="smart-form" onSubmit={prepareBulk}>{bulkMode !== 'class' && <label><span>الشهر الجديد</span>{monthSelect(bulkForm.month, (value) => setBulkForm((old) => ({ ...old, month: value })), 'اختر الشهر', true)}</label>}{bulkMode !== 'month' && <><label><span>التصنيف الجديد</span><select value={bulkForm.accounting_class} onChange={(e) => setBulkForm((old) => ({ ...old, accounting_class: e.target.value, proposed_category: '' }))}><option value="">اختر التصنيف صراحةً</option>{HISTORICAL_CLASS_OPTIONS.filter(([key]) => key !== 'review').map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>القسم الفرعي</span><select value={bulkForm.proposed_category} onChange={(e) => setBulkForm((old) => ({ ...old, proposed_category: e.target.value }))}><option value="">اختياري</option>{(HISTORICAL_SUBCATEGORIES[bulkForm.accounting_class] || []).map((item) => <option key={item} value={item}>{item}</option>)}</select></label></> }<label><span>ملاحظة مشتركة اختيارية</span><textarea value={bulkForm.notes} onChange={(e) => setBulkForm((old) => ({ ...old, notes: e.target.value }))} /></label><div className="notice"><strong>عدد البنود: {selectedRows.length}</strong><span>{bulkMode === 'month' ? `الشهر: ${bulkForm.month || 'لم يُحدد'}` : bulkMode === 'class' ? `التصنيف: ${historicalClassLabel(bulkForm.accounting_class)}` : `الشهر: ${bulkForm.month || 'لم يُحدد'} · التصنيف: ${historicalClassLabel(bulkForm.accounting_class)}`}</span></div><button className="primary wide" disabled={busy}>معاينة قبل التنفيذ</button></form>{bulkPreview && <div className="notice"><strong>معاينة التنفيذ: {bulkPreview.rows.length} بندًا</strong><span>سيتم تطبيق {bulkPreview.patch.month ? `الشهر ${bulkPreview.patch.month}` : ''}{bulkPreview.patch.accounting_class ? ` والتصنيف ${historicalClassLabel(bulkPreview.patch.accounting_class)}` : ''} فقط.</span><button className="primary wide" disabled={busy} onClick={confirmBulk}>تأكيد حفظ ونقل المحدد</button></div>}</Modal>}</div>;
+}
+
+function HistoricalImportsLegacyV2({ setToast, can = () => false }) {
+  const [rows, setRows] = useState([]); const [summary, setSummary] = useState(null); const [preview, setPreview] = useState(null); const [selected, setSelected] = useState(new Set()); const [assignMonth, setAssignMonth] = useState(''); const [viewMonth, setViewMonth] = useState('all'); const [filter, setFilter] = useState('all'); const [query, setQuery] = useState(''); const [busy, setBusy] = useState(false); const [classificationResult, setClassificationResult] = useState(null); const [loadState, setLoadState] = useState('loading'); const [loadError, setLoadError] = useState('');
+  const loadRequest = useRef(0); const pendingClassificationUpdates = useRef(new Map());
+  const load = async () => { const request = ++loadRequest.current; setLoadState('loading'); setLoadError(''); try { const data = await api.historicalImportSummary(); if (request !== loadRequest.current) return false; setRows(data.rows); setSummary(data.totals); setLoadState('ready'); return true; } catch (e) { if (request !== loadRequest.current) return false; const message = userFacingError(e); setLoadError(message); setLoadState('error'); return false; } };
+  useEffect(() => { load(); return () => { loadRequest.current += 1; }; }, []);
+  const read = async (event) => { const file = event.target.files?.[0]; if (!file) return; setBusy(true); try { const wb = XLSX.read(await file.arrayBuffer(), { cellDates: true, cellFormula: true }); const parsed = parseHistoricalWorkbook(wb, file.name); setPreview({ filename: file.name, rows: markPotentialDuplicates(parsed, rows), sheets: wb.SheetNames }); setToast?.(`تمت معاينة ${parsed.length} بندًا من ${file.name} دون كتابة.`); } catch (e) { setToast?.(`تعذر قراءة الملف: ${e.message || e}`); } finally { setBusy(false); event.target.value = ''; } };
+  const toggle = (id) => setSelected((old) => { const next = new Set(old); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  const toggleAllVisible = (checked) => setSelected((old) => { const next = new Set(old); selectableVisible.forEach((row) => checked ? next.add(row.id) : next.delete(row.id)); return next; });
+  const clearSelection = () => setSelected((old) => { const next = new Set(old); selectableVisible.forEach((row) => next.delete(row.id)); return next; });
+  const updateMany = async () => { if (!assignMonth || !selected.size || loadState !== 'ready') return; setBusy(true); const failed = []; const succeeded = []; try { for (const id of selected) { const row = rows.find((item) => item.id === id); try { await api.updateHistoricalImport(id, { month: assignMonth }); succeeded.push(id); } catch (error) { failed.push({ row, reason: userFacingError(error) }); } } await load(); setSelected((old) => { const next = new Set(old); succeeded.forEach((id) => next.delete(id)); return next; }); setAssignMonth(''); if (failed.length) setToast?.(`تم تحديث ${succeeded.length} بندًا، وفشل ${failed.length}. راجع التفاصيل.`); else setToast?.('تم تعيين الشهر للبنود المحددة.'); } finally { setBusy(false); } };
+  const classifyMany = async () => {
+    const selectedRows = rows.filter((row) => selected.has(row.id));
+    if (!selectedRows.length) return;
+    setBusy(true); setClassificationResult(null);
+    const failed = []; let succeeded = 0;
+    for (const row of selectedRows) {
+      if (['suspected', 'existing'].includes(row.duplicate_status)) { failed.push({ row, reason: 'مستثنى تلقائيًا لأن عليه علامة تكرار محتمل/موجود مسبقًا وتحتاج مراجعته مستقلًا.' }); continue; }
+      const accountingClass = String(row.accounting_class || 'review').trim();
+      if (accountingClass === 'review') { failed.push({ row, reason: 'لم يتم اختيار تصنيف محاسبي.' }); continue; }
+      try {
+        await pendingClassificationUpdates.current.get(row.id);
+        await api.updateHistoricalImport(row.id, { accounting_class: accountingClass });
+        succeeded++;
+        setSelected((current) => { const next = new Set(current); next.delete(row.id); return next; });
+      } catch (error) { failed.push({ row, reason: userFacingError(error) }); }
+    }
+    await load();
+    const result = { succeeded, failed };
+    setClassificationResult(result);
+    if (failed.length) setToast?.(`تم نقل ${succeeded} بندًا، وفشل ${failed.length} بند. راجع أسباب الفشل أدناه.`);
+    else setToast?.(`تم نقل ${succeeded} بندًا بنجاح إلى أقسامها.`);
+    setBusy(false);
+  };
+  const importFile = async () => { if (!preview?.rows?.length) return; setBusy(true); try { const result = await api.importHistoricalBatch({ filename: preview.filename, rows: preview.rows }); setPreview(null); await load(); setToast?.(`تم الاستيراد: ${result.inserted_rows} جديد، ${result.skipped_rows} موجود مسبقًا، ${result.invalid_rows} غير صالح.`); } catch (e) { setToast?.(userFacingError(e)); } finally { setBusy(false); } };
+  const updateRow = (row, patch) => { setRows((current) => current.map((item) => item.id === row.id ? { ...item, ...patch, review_required: patch.accounting_class ? patch.accounting_class === 'review' : item.review_required } : item)); const pending = api.updateHistoricalImport(row.id, patch).catch((error) => { setLoadError(userFacingError(error)); return { failed: true, error }; }); pendingClassificationUpdates.current.set(row.id, pending); pending.finally(() => { if (pendingClassificationUpdates.current.get(row.id) === pending) pendingClassificationUpdates.current.delete(row.id); }); };
+  const visible = filterHistoricalRows({ rows, filter, month: viewMonth, query }); const selectableVisible = visible.filter((row) => !['suspected', 'existing'].includes(row.duplicate_status) && !isClassificationReview(row)); const selectedVisibleCount = selectableVisible.filter((row) => selected.has(row.id)).length; const excludedVisibleCount = visible.length - selectableVisible.length; const allVisibleSelected = selectableVisible.length > 0 && selectedVisibleCount === selectableVisible.length; const visibleTotals = summarizeHistoricalRows(visible); const monthOptions = historicalMonthOptions(rows);
+   const cards = summary ? [['عدد البنود المستوردة', summary.importedCount], ['إجمالي قيمة المستورد', summary.importedValue], ['إجمالي الأصول الثابتة المصنّفة', summary.fixedAssetValue], ['إجمالي المشتريات المصنّفة', summary.purchaseValue], ['إجمالي تكاليف التأسيس والمصروفات', summary.setupMaterialsValue], ['بدون شهر', `${summary.withoutMonthCount.toLocaleString('ar-IQ')} · ${money(summary.withoutMonthValue)}`], ['التكرارات المعلّقة', `${summary.suspectedCount.toLocaleString('ar-IQ')} · ${money(summary.suspectedValue)}`]] : [];
+  const monthSelect = (value, onChange, label, assignment = false) => <select aria-label={label} value={value} onChange={(e) => onChange(e.target.value)}><option value={assignment ? '' : 'all'}>{label}</option>{!assignment && <option value="withoutMonth">بدون شهر</option>}{monthOptions.map((item) => <option key={item} value={item}>{item}</option>)}</select>;
+  const rowAction = (row) => <div className="payroll-actions"><select aria-label={`تصنيف ${row.name || 'البند'}`} value={row.accounting_class || 'review'} onChange={(e) => updateRow(row, { accounting_class: e.target.value })} disabled={busy}><option value="review">يحتاج مراجعة</option><option value="fixed_asset">أصل ثابت</option><option value="expense">مصروف</option><option value="purchase">مشتريات</option><option value="setup_cost">تكاليف تأسيس</option><option value="supplies">مستلزمات / مشتريات</option></select></div>;
+   const historicalColumns = [["name", "البند"], ["description", "الوصف الأصلي"], ["amount", "القيمة", money], ["transaction_date", "تاريخ العملية", (v) => v || "غير موثق"], ["accounting_month", "الشهر المحاسبي", (v) => v || "بدون شهر"], ["month_source", "مصدر الشهر"], ["proposed_category", "التصنيف المقترح"], ["source_filename", "الملف"], ["source_row", "الصف"], ["duplicate_status", "التكرار", (v) => v === "clear" ? "سليم" : v === "suspected" ? "مشتبه" : "موجود مسبقًا"]];
+   const previewColumns = [["name", "البند"], ["amount", "القيمة", money], ["date", "التاريخ", (v) => v || "بدون شهر"], ["proposed_category", "التصنيف"], ["source_sheet", "الورقة"], ["source_row", "الصف"]];
+    if (loadState === 'loading') return <div className="screen-stack"><Panel title="الاستيراد التاريخي وإدارة بدون شهر"><LoadingBlock /><div className="loading-message">جاري تحميل البنود...</div></Panel></div>;
+    if (loadState === 'error') return <div className="screen-stack"><Panel title="الاستيراد التاريخي وإدارة بدون شهر"><div className="error" role="alert">تعذر تحميل البنود: {loadError}</div><button className="primary" onClick={load}>إعادة المحاولة</button></Panel></div>;
+    return <div className="screen-stack"><Panel title="الاستيراد التاريخي وإدارة بدون شهر" action="المصدر محفوظ: الملف · الورقة · الصف"><div className="report-summary-grid">{cards.map(([label, value]) => <div className="report-summary-card" key={label}><span>{label}</span><strong>{typeof value === 'number' && label.includes('عدد') ? value.toLocaleString('ar-IQ') : typeof value === 'number' ? money(value) : value}</strong></div>)}</div><div className="toolbar"><div className="table-search"><Search size={17} /><input placeholder="بحث في البنود..." value={query} onChange={(e) => setQuery(e.target.value)} disabled={busy} /></div><label className="secondary file-button"><FileSpreadsheet size={17} /> {busy ? 'جارٍ العمل...' : 'معاينة ملف XLSX'}<input type="file" accept=".xlsx,.xls" onChange={read} disabled={busy || !can('excel.import')} /></label>{monthSelect(viewMonth, setViewMonth, 'شهر العرض: كل البنود')} {monthSelect(assignMonth, setAssignMonth, 'شهر تعيين البنود المحددة', true)}<button className="secondary" disabled={busy || !selectedVisibleCount} onClick={clearSelection}>إلغاء تحديد الكل</button><button className="primary" disabled={busy || !assignMonth || !selected.size || !can('excel.import')} onClick={updateMany}>تعيين الشهر للمحدد ({selected.size})</button><button className="primary" disabled={busy || !selected.size || !can('excel.import')} onClick={classifyMany}>نقل البنود المحددة ({selected.size})</button><span className="muted">المحدد: {selected.size} · التحديد للنتائج الظاهرة فقط{excludedVisibleCount ? ` · مستثنى: ${excludedVisibleCount} تكرار مشتبه` : ''}</span></div>{classificationResult && <div className={classificationResult.failed.length ? 'duplicate-warning' : 'notice'}><strong>{classificationResult.failed.length ? `نُقل ${classificationResult.succeeded} بندًا، وفشل ${classificationResult.failed.length}` : `تم نقل ${classificationResult.succeeded} بندًا بنجاح`}</strong>{classificationResult.failed.length > 0 && <span>{classificationResult.failed.map(({ row, reason }) => `${row.name || row.id}: ${reason}`).join(' · ')}</span>}<small>علامة «تكرار مشتبه» تُراجع مستقلًا ولم تتغير.</small></div>}<div className="report-summary-grid"><div className="report-summary-card"><span>البنود المعروضة حسب الفلتر</span><strong>{visible.length.toLocaleString('ar-IQ')}</strong></div><div className="report-summary-card"><span>قيمة العرض دون احتساب التكرار المعلّق</span><strong>{money(visibleTotals.importedValue)}</strong></div></div><div className="filter-pills"><button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>كل البنود ({rows.length})</button><button className={filter === 'withoutMonth' ? 'active' : ''} onClick={() => setFilter('withoutMonth')}>بدون شهر ({summary?.withoutMonthCount || 0})</button><button className={filter === 'review' ? 'active' : ''} onClick={() => setFilter('review')}>يحتاج مراجعة ({rows.filter((r) => isClassificationReview(r)).length})</button><button className={filter === 'suspected' ? 'active' : ''} onClick={() => setFilter('suspected')}>التكرارات المعلّقة ({summary?.suspectedCount || 0})</button></div>{visible.length ? <DataTable rows={visible} columns={[["__select", <label><input type="checkbox" aria-label="تحديد الكل" checked={allVisibleSelected} onChange={(event) => toggleAllVisible(event.target.checked)} /> تحديد الكل</label>, (_, row) => <input type="checkbox" aria-label={`تحديد ${row.name || 'البند'}`} checked={selected.has(row.id)} disabled={row.duplicate_status === 'suspected'} onChange={() => toggle(row.id)} />], ["name", "البند"], ["description", "الوصف الأصلي"], ["amount", "القيمة", money], ["date", "التاريخ", (v) => v || "بدون شهر"], ["month", "الشهر", (v) => v || "بدون شهر"], ["proposed_category", "التصنيف المقترح"], ["source_filename", "الملف"], ["source_row", "الصف"], ["duplicate_status", "التكرار", (v) => v === "clear" ? "سليم" : v === "suspected" ? "مشتبه" : "موجود مسبقًا"]]} rowActions={rowAction} /> : <Empty text="لا توجد بنود في هذا القسم" />}</Panel>{preview && <Panel title={`معاينة ${preview.filename}`} action={preview.filename}><div className="notice"><strong>لن يتوقف الاستيراد بسبب تاريخ أو تصنيف ناقص.</strong><span>سيُحفظ كل بند، ويظهر بلا شهر أو بعلامة يحتاج مراجعة حسب بياناته.</span></div><DataTable rows={preview.rows.slice(0, 100)} columns={previewColumns} /><button className="primary" disabled={busy || !can('excel.import')} onClick={importFile}>تأكيد استيراد كل البنود</button><button className="secondary" onClick={() => setPreview(null)}>إلغاء المعاينة</button></Panel>}</div>;
 }
 function Cash(p) {
   const { selectedMonth = currentMonth(), can = () => false, setToast } = p;
@@ -1738,6 +2273,7 @@ function Cash(p) {
 function Payroll(p) {
   const { selectedMonth = currentMonth(), can = () => false, setToast, isMonthClosed = false } = p;
   const [rows, setRows] = useState([]), [adjustments, setAdjustments] = useState([]), [payments, setPayments] = useState([]), [legacyAdvances, setLegacyAdvances] = useState([]), [debts, setDebts] = useState([]), [filter, setFilter] = useState("all"), [query, setQuery] = useState(""), [modal, setModal] = useState(null), [busy, setBusy] = useState(false);
+  useNewAction('payroll', async () => { if (busy || isMonthClosed || !can('payroll.create')) return; setBusy(true); try { const count = await api.createPayrollForMonth(selectedMonth); setToast?.(`تم إنشاء ${count} كشف راتب`); await load(); } catch (e) { setToast?.(e.message); } finally { setBusy(false); } });
   const load = async () => { try { const [payroll, adj, pay, legacy, employees, debtRows] = await Promise.all([api.list("payroll"), api.list("payroll_adjustments").catch(() => []), api.list("payroll_payments").catch(() => []), api.list("employee_advances").catch(() => []), api.list("employees").catch(() => []), api.list("employee_debts").catch(() => [])]); const employeeById = new Map(employees.map((employee) => [employee.id || employee.employee_id, employee])); const allRows = buildPayrollRows({ payroll, employees, month: selectedMonth }); setRows(await Promise.all(allRows.map((row) => api.calculatePayrollWithDebts({ payroll: row, adjustments: adj, payments: pay, debts: debtRows, employee: employeeById.get(row.employee_id || row.employee), month: selectedMonth })))); setAdjustments(adj); setPayments(pay); setDebts(debtRows); setLegacyAdvances(recordsForMonth(legacy, selectedMonth)); } catch (e) { setRows([]); setToast?.(e.message); } };
   useEffect(() => { load(); }, [selectedMonth]);
   useEffect(() => { const handler = (event) => setModal({ type: 'link', row: event.detail }); document.addEventListener('legacy:link', handler); return () => document.removeEventListener('legacy:link', handler); }, []);
@@ -1762,7 +2298,7 @@ function Reports({ setToast, reportRange = { mode: "month", month: currentMonth(
   return (
     <div className="screen-stack">
       <section className="panel report-period-panel"><div><p className="eyebrow">الفترة المحددة</p><h2>{label}</h2></div><span>من تاريخ البداية إلى تاريخ النهاية — الحدود شاملة</span></section>
-      {data && <Panel title="ملخص الفترة" action="البيانات الفعلية داخل الفترة المحددة"><div className="report-summary-grid">{[["الوارد الكلي", summary.netSales], ["المشتريات", summary.purchases], ["المصروفات", summary.expenses], ["الإيرادات الأخرى", summary.otherIncome], ["مدفوعات الرواتب خلال الفترة", summary.payrollPayments], ["إجمالي الديون عليّ", summary.debtsPayable], ["إجمالي الديون إليّ", summary.debtsReceivable], ["المتأخر عليّ", summary.overduePayable], ["المتأخر إليّ", summary.overdueReceivable], ["المسدد خلال الفترة", summary.debtSettledDuringRange], ["صافي النتيجة للفترة", summary.netResult]].map(([title, value]) => <div className="report-summary-card" key={title}><span>{title}</span><strong>{money(value)}</strong></div>)}</div></Panel>}
+      {data && <Panel title="ملخص الفترة" action="البيانات الفعلية داخل الفترة المحددة"><div className="report-summary-grid">{[["صافي المبيعات", summary.netSales], ["المشتريات (مؤشر تدفق، ليست COGS)", summary.purchases], ["تكلفة البضاعة المباعة", summary.cogs], ["مجمل الربح", summary.grossProfit], ["مصروفات التشغيل", summary.operatingExpenses], ["مدفوعات الرواتب خلال الفترة", summary.payrollPayments], ["صافي الربح / الخسارة", summary.netProfit], ["الإيرادات الأخرى", summary.otherIncome], ["إجمالي الديون عليّ", summary.debtsPayable], ["إجمالي الديون إليّ", summary.debtsReceivable], ["المتأخر عليّ", summary.overduePayable], ["المتأخر إليّ", summary.overdueReceivable], ["المسدد خلال الفترة", summary.debtSettledDuringRange]].map(([title, value]) => <div className="report-summary-card" key={title}><span>{title}</span><strong>{value == null ? "غير مكتمل" : money(value)}</strong></div>)}</div>{summary.profitabilityStatus === "incomplete_missing_cogs" && <div className="notice"><strong>الربحية غير مكتملة</strong><span>لا توجد تكلفة بضاعة مباعة موثوقة مرتبطة بالمبيعات لهذه الفترة؛ المشتريات لا تُطرح تلقائياً كتكلفة مبيعات.</span></div>}</Panel>}
       <Panel title="التقارير" action="تقارير مالية ومخزون وموظفين">
         <div className="report-grid">
           {[

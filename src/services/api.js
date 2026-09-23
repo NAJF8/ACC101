@@ -12,12 +12,98 @@ import { createDashboardRefreshScheduler } from './dashboard-realtime.js';
 import { DEFAULT_LOCATION_ID, availableServings, barcodeMatch, expiryAlerts, locationBalances, locationQuantity, makeInternalCode, recipeCost, roundInventory, selectFefoBatches, toBaseQuantity, weightedAverageCost, inventoryQuantity } from './inventory.js';
 import { buildSystemNotifications } from './notifications.js';
 import { debtAmount, debtPaid, normalizeDebt, resolveDebts } from './debts.js';
+import { buildAuditSnapshot } from './audit-center.js';
 export { permissionGroups } from './permissions.js';
 
 const withoutUndefined = (value) => {
   if (Array.isArray(value)) return value.map(withoutUndefined);
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined).map(([key, item]) => [key, withoutUndefined(item)]));
+};
+
+const historicalAssetId = (historicalId) => `historical_${String(historicalId || '').replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+const classificationReviewState = (accountingClass) => String(accountingClass || 'review').trim() === 'review';
+const historicalDestinationMap = {
+  fixed_asset: 'assets',
+  expense: 'expenses',
+  purchase: 'purchases',
+  supplies: 'expenses',
+  setup_cost: 'establishment_costs',
+};
+const historicalSupportedClasses = new Set(Object.keys(historicalDestinationMap));
+const historicalAssetPayload = ({ historical, assetId, existing, session, now, status }) => withoutUndefined({
+  ...(existing || {}),
+  id: assetId,
+  historical_import_id: historical.id,
+  source_type: 'historical_import',
+  source_id: historical.id,
+  import_key: historical.import_key,
+  name: historical.name,
+  category: historical.proposed_category || historical.category || 'بنود تحتاج مراجعة',
+  asset_category_id: historical.asset_category_id || null,
+  accounting_class: historical.accounting_class || 'review',
+  review_required: classificationReviewState(historical.accounting_class),
+  classification_review_status: classificationReviewState(historical.accounting_class) ? 'needs_review' : 'approved',
+  quantity: historical.quantity ?? null,
+  unit_price: historical.unit_price ?? null,
+  total: Number(historical.amount || 0),
+  purchase_price: Number(historical.amount || 0),
+  purchase_date: historical.date || null,
+  month: historical.month || null,
+  accounting_month: historical.accounting_month || historical.month || null,
+  month_source: historical.month_source || null,
+  transaction_date: historical.transaction_date || historical.date || null,
+  without_month: !historical.month,
+  notes: historical.description || historical.notes || '',
+  source_filename: historical.source_filename || '',
+  source_sheet: historical.source_sheet || '',
+  source_row: Number(historical.source_row || 0),
+  import_batch_id: historical.import_batch_id || null,
+  status: status || 'active',
+  classification_status: status === 'active' ? 'active' : 'classified_elsewhere',
+  deleted: status !== 'active',
+  created_at: existing?.created_at || historical.created_at || now,
+  created_by: existing?.created_by || historical.created_by || session.user.id,
+  updated_at: now,
+  updated_by: session.user.id,
+});
+const findHistoricalAsset = (assets, historical) => assets.find((asset) => asset.historical_import_id === historical.id || (historical.import_key && asset.import_key === historical.import_key));
+const historicalDestinationId = (historicalId) => historicalAssetId(historicalId);
+const historicalSourceFields = ({ historical, id, now, userId, status = 'active', deleted = false }) => withoutUndefined({
+  id,
+  historical_import_id: historical.id,
+  source_type: 'historical_import',
+  source_id: historical.id,
+  source_key: `historical_import:${historical.id}`,
+  import_key: historical.import_key,
+  name: historical.name,
+  description: historical.description || historical.name,
+  notes: historical.notes || historical.description || '',
+  amount: Number(historical.amount || 0),
+  date: historical.date || null,
+  month: historical.month || null,
+  accounting_month: historical.accounting_month || historical.month || null,
+  month_source: historical.month_source || null,
+  transaction_date: historical.transaction_date || historical.date || null,
+  without_month: !historical.month,
+  source_filename: historical.source_filename || '',
+  source_sheet: historical.source_sheet || '',
+  source_row: Number(historical.source_row || 0),
+  status,
+  classification_status: status,
+  deleted,
+  created_at: now,
+  created_by: userId,
+  updated_at: now,
+  updated_by: userId,
+});
+const historicalDestinationPayload = ({ historical, destinationType, id, existing, session, now }) => {
+  const base = historicalSourceFields({ historical, id, now, userId: session.user.id });
+  const category = historical.proposed_category || historical.category || 'مصروفات تاريخية';
+  if (destinationType === 'assets') return historicalAssetPayload({ historical, assetId: id, existing, session, now, status: 'active' });
+  if (destinationType === 'expenses') return withoutUndefined({ ...existing, ...base, category, category_name: category, payment_method: 'historical', paid_amount: Number(historical.amount || 0), remaining_amount: 0, payment_status: 'paid', historical_classification: true });
+  if (destinationType === 'purchases') return withoutUndefined({ ...existing, ...base, purchase_type: 'historical', item_name: historical.name, inventory_item_name: historical.name, quantity: historical.quantity ?? null, unit: historical.unit || '', unit_price: historical.unit_price ?? Number(historical.amount || 0), total_after_discount: Number(historical.amount || 0), payment_method: 'historical', historical_classification: true });
+  return withoutUndefined({ ...existing, ...base, date: historical.date || '', month: historical.month || '', category_name: category, paid_amount: Number(historical.amount || 0), remaining_amount: 0, payment_status: 'paid', payment_method: 'historical', historical_classification: true });
 };
 
 const normalizePurchasePayload = (payload) => {
@@ -110,6 +196,8 @@ const normalizedEmailKey = (email) => normalizeEmail(email).replace(/[.#$\[\]/]/
 const normalizeArabic = (value) => String(value || '').trim().toLowerCase().replace(/[ًٌٍَُِّْـ]/g, '').replace(/[إأآ]/g, 'ا').replace(/ى/g, 'ي').replace(/\s+/g, ' ');
 const normalizeName = (value) => normalizeArabic(value);
 const inventoryCategoryDefaults = ['قهوة مخفقة', 'قهوة إيلي', 'الحليب', 'العصائر', 'مشروبات ساخنة', 'مشروبات باردة', 'المنظفات', 'مياه الشرب', 'أدوات', 'مواد غذائية / مؤنة', 'حلويات', 'ساندويتشات', 'إضافات / أخرى'];
+const assetCategoryDefaults = ['أجهزة القهوة', 'الكهربائيات', 'معدات المطبخ', 'الكاونترات والديكور', 'الأرضيات والإنشائيات', 'التبريد والتكييف', 'الأثاث', 'أجهزة الكاشير والحاسبات', 'تجهيزات أخرى'];
+const assetCategoryKey = (value) => normalizeName(value).replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 80) || 'asset-category';
 const validNumber = (value, label) => { const n = Number(value); if (!Number.isFinite(n) || n < 0) throw new Error(`${label} يجب أن يكون رقماً موجباً.`); return n; };
 const requireEmployeeId = (employeeId, message = 'تعذر تنفيذ العملية لأن الموظف غير مربوط بملف موظف.') => {
   if (!employeeId) throw new Error(message);
@@ -142,7 +230,7 @@ const SYSTEM_RESET_TARGETS = [
   'expenses', 'other_income', 'payroll', 'payroll_adjustments', 'payroll_payments', 'employee_advances', 'employee_debts', 'debts', 'debt_payments', 'debt_settlement_operations',
   'cash_movements', 'cash_transfers', 'owner_withdrawals', 'owner_deposits', 'cashier_shifts', 'cash_month_closings', 'cash_month_openings', 'cash_carry_forwards',
   'monthly_periods', 'legacy_monthly_summaries', 'legacy_payroll_costs', 'inventory_movements', 'inventory_operations', 'inventory_batches', 'inventory_waste', 'inventory_transfers', 'stocktakes', 'stocktake_items',
-  'partners', 'partner_payments', 'establishment_costs', 'establishment_categories'
+  'partners', 'partner_payments', 'partner_operations', 'partner_operation_claims', 'partner_settlements', 'establishment_costs', 'establishment_categories'
 ];
 const resetBackupCounts = (snapshot) => Object.fromEntries(Object.entries(snapshot).map(([key, value]) => [key, value && typeof value === 'object' ? Object.keys(value).length : 0]));
 const checkMonthOpen = async (month) => {
@@ -337,15 +425,53 @@ export const api = {
   },
   listPartnerCapital: async () => {
     await requireSuperAdmin();
-    const [partners, payments] = await Promise.all([api.list('partners'), api.list('partner_payments')]);
-    return { ...buildPartnerCapitalSummary({ partners, payments }), payments };
+    const [partners, payments, operations, settlements] = await Promise.all([api.list('partners'), api.list('partner_payments'), api.list('partner_operations').catch(() => []), api.list('partner_settlements').catch(() => [])]);
+    const activeOperations = operations.filter((row) => !row.deleted);
+    const rows = partners.filter((row) => !row.deleted).map((partner) => {
+      const capitalPayments = payments.filter((row) => !row.deleted && row.partner_id === partner.id).reduce((n, row) => n + Number(row.amount || 0), 0);
+      const capitalOperations = activeOperations.filter((row) => row.partner_id === partner.id && row.operation_type === 'personal_purchase' && row.funding_mode === 'capital').reduce((n, row) => n + Number(row.amount || 0), 0);
+      const personalPurchases = activeOperations.filter((row) => row.partner_id === partner.id && row.operation_type === 'personal_purchase').reduce((n, row) => n + Number(row.amount || 0), 0);
+      const owed = activeOperations.filter((row) => row.partner_id === partner.id && (row.operation_type === 'partner_loan' || (row.operation_type === 'personal_purchase' && row.funding_mode === 'payable'))).reduce((n, row) => n + Number(row.amount || 0), 0);
+      const settled = settlements.filter((row) => !row.deleted && row.partner_id === partner.id).reduce((n, row) => n + Number(row.amount || 0), 0);
+      const withdrawals = activeOperations.filter((row) => row.partner_id === partner.id && row.operation_type === 'partner_withdrawal').reduce((n, row) => n + Number(row.amount || 0), 0);
+      const dates = [...payments, ...activeOperations, ...settlements].filter((row) => row.partner_id === partner.id).map((row) => row.date || row.created_at).filter(Boolean).sort();
+      return { ...partner, paid_capital: capitalPayments + capitalOperations, capital_operations: capitalOperations, personal_purchases: personalPurchases, owed_amount: owed, settled_amount: settled, remaining_owed: Math.max(0, owed - settled), withdrawals, last_operation_date: dates.at(-1) || null };
+    });
+    const grouped = new Map();
+    rows.forEach((row) => {
+      const key = normalizeName(row.name);
+      const existing = grouped.get(key);
+      if (!existing) {
+        grouped.set(key, { ...row, partner_ids: [row.id], duplicate_record_count: 1 });
+        return;
+      }
+      const preferred = row.agreed_capital_specified !== false && existing.agreed_capital_specified === false ? row : existing;
+      grouped.set(key, {
+        ...preferred,
+        partner_ids: [...existing.partner_ids, row.id],
+        duplicate_record_count: existing.duplicate_record_count + 1,
+        paid_capital: Number(existing.paid_capital || 0) + Number(row.paid_capital || 0),
+        capital_operations: Number(existing.capital_operations || 0) + Number(row.capital_operations || 0),
+        personal_purchases: Number(existing.personal_purchases || 0) + Number(row.personal_purchases || 0),
+        owed_amount: Number(existing.owed_amount || 0) + Number(row.owed_amount || 0),
+        settled_amount: Number(existing.settled_amount || 0) + Number(row.settled_amount || 0),
+        withdrawals: Number(existing.withdrawals || 0) + Number(row.withdrawals || 0),
+        remaining_owed: Math.max(0, Number(existing.owed_amount || 0) + Number(row.owed_amount || 0) - Number(existing.settled_amount || 0) - Number(row.settled_amount || 0)),
+        last_operation_date: [existing.last_operation_date, row.last_operation_date].filter(Boolean).sort().at(-1) || null,
+      });
+    });
+    const displayPartners = [...grouped.values()];
+    return { partners: displayPartners, operations: activeOperations.sort((a, b) => String(b.date || b.created_at).localeCompare(String(a.date || a.created_at))), settlements, payments, agreed: displayPartners.filter((row) => row.agreed_capital_specified !== false).reduce((n, row) => n + Number(row.agreed_capital || 0), 0), paid: displayPartners.reduce((n, row) => n + Number(row.paid_capital || 0), 0), remaining: displayPartners.filter((row) => row.agreed_capital_specified !== false).reduce((n, row) => n + Math.max(0, Number(row.agreed_capital || 0) - Number(row.paid_capital || 0)), 0), documentedCapital: displayPartners.reduce((n, row) => n + Number(row.paid_capital || 0), 0), totalOwed: displayPartners.reduce((n, row) => n + Number(row.remaining_owed || 0), 0) };
   },
   savePartner: async ({ id, name, agreed_capital, notes = '' } = {}) => {
     const s = await requireSuperAdmin();
-    const nameValue = String(name || '').trim(); const agreed = Number(agreed_capital);
-    if (!nameValue || !Number.isFinite(agreed) || agreed < 0) throw new Error('اسم الشريك ورأس المال المتفق عليه مطلوبان.');
+    const nameValue = String(name || '').trim();
+    const agreedProvided = agreed_capital !== null && agreed_capital !== undefined && String(agreed_capital).trim() !== '';
+    const agreed = agreedProvided ? Number(agreed_capital) : null;
+    if (!nameValue || (agreedProvided && (!Number.isFinite(agreed) || agreed < 0))) throw new Error('اسم الشريك مطلوب، ورأس المال المتفق عليه يجب أن يكون رقماً موجباً أو صفراً عند تحديده.');
+    if (!id) { const duplicate = (await api.list('partners')).find((row) => !row.deleted && normalizeName(row.name) === normalizeName(nameValue)); if (duplicate) throw new Error('هذا الشريك موجود مسبقًا. افتح سجله وعدّل بياناته بدل إنشاء شريك مكرر.'); }
     const partnerRef = id ? ref(db, `partners/${id}`) : push(ref(db, 'partners')); const old = id ? await api.get(`partners/${id}`) : null; const now = new Date().toISOString();
-    const item = withoutUndefined({ id: partnerRef.key, name: nameValue, agreed_capital: agreed, notes: String(notes || '').trim(), created_at: old?.created_at || now, created_by: old?.created_by || s.user.id, updated_at: now, updated_by: s.user.id });
+    const item = withoutUndefined({ id: partnerRef.key, name: nameValue, agreed_capital: agreed, agreed_capital_specified: agreedProvided, notes: String(notes || '').trim(), created_at: old?.created_at || now, created_by: old?.created_by || s.user.id, updated_at: now, updated_by: s.user.id });
     await set(partnerRef, item); await api.logAudit(old ? 'PARTNER_UPDATED' : 'PARTNER_CREATED', 'partners', item.id, { before: old, after: item }); return item;
   },
   addPartnerPayment: async ({ partner_id, amount, date, payment_method = 'cash', cash_account_id, notes = '' } = {}) => {
@@ -358,11 +484,103 @@ export const api = {
     await update(ref(db), { [`partner_payments/${item.id}`]: item, [`cash_movements/${movement.id}`]: movement });
     await api.logAudit('PARTNER_PAYMENT_CREATED', 'partner_payments', item.id, item); return item;
   },
+  createPartnerOperation: async (payload = {}) => {
+    const s = await requireSuperAdmin();
+    const partner = await api.get(`partners/${payload.partner_id}`);
+    const type = String(payload.operation_type || '').trim();
+    const value = Number(payload.amount);
+    const date = payload.date || new Date().toISOString().slice(0, 10);
+    const month = payload.month || date.slice(0, 7);
+    const allowed = new Set(['capital_contribution', 'personal_purchase', 'partner_loan', 'partner_settlement', 'partner_withdrawal']);
+    if (!partner || partner.deleted) throw new Error('الشريك غير موجود.');
+    if (!allowed.has(type) || !Number.isFinite(value) || value <= 0) throw new Error('نوع العملية والمبلغ مطلوبان.');
+    await checkMonthOpen(month);
+    const operationKey = operationKeyFor('partner_operation', payload.operation_key);
+    const claim = await claimOperation('partner_operation_claims', operationKey, { operation_key: operationKey, status: 'pending', created_at: new Date().toISOString(), created_by: s.user.id });
+    if (!claim.committed) return duplicateOperationResult(claim.operation, operationKey);
+    const now = new Date().toISOString();
+    const opRef = push(ref(db, 'partner_operations'));
+    const op = withoutUndefined({ id: opRef.key, operation_key: operationKey, partner_id: partner.id, partner_name: partner.name, operation_type: type, amount: value, date, month, description: String(payload.description || '').trim(), item_name: String(payload.item_name || '').trim(), accounting_class: payload.accounting_class || '', asset_category_id: payload.asset_category_id || '', asset_category_name: payload.asset_category_name || '', asset_subcategory_id: payload.asset_subcategory_id || '', asset_subcategory_name: payload.asset_subcategory_name || '', funding_mode: payload.funding_mode || '', payment_method: payload.payment_method || 'personal', cash_account_id: payload.cash_account_id || '', notes: String(payload.notes || '').trim(), created_at: now, created_by: s.user.id, status: 'completed' });
+    const updates = { [`partner_operations/${op.id}`]: op, [`partner_operation_claims/${operationKey}`]: { ...claim.operation, id: op.id, result_id: op.id, status: 'completed', completed_at: now } };
+    if (type === 'partner_settlement') {
+      const all = await api.listPartnerCapital();
+      const row = all.partners.find((item) => item.id === partner.id);
+      if (!row || value > Number(row.remaining_owed || 0)) throw new Error('التسديد يتجاوز المستحق غير المسدد.');
+      const settlementRef = push(ref(db, 'partner_settlements'));
+      const settlement = { id: settlementRef.key, partner_id: partner.id, partner_name: partner.name, amount: value, date, month, payment_method: payload.payment_method || 'cash', cash_account_id: payload.cash_account_id || 'cashier', original_operation_id: payload.original_operation_id || '', operation_key: operationKey, notes: op.notes, created_at: now, created_by: s.user.id };
+      updates[`partner_settlements/${settlement.id}`] = settlement;
+      if (String(payload.payment_method || 'cash') === 'cash') { const cashRef = push(ref(db, 'cash_movements')); updates[`cash_movements/${cashRef.key}`] = { id: cashRef.key, type: 'OUT', amount: value, cash_account_id: settlement.cash_account_id, date, month, payment_method: 'cash', source_type: 'partner_settlement', source_id: settlement.id, source_key: `partner_settlement:${operationKey}`, operation_key: operationKey, reason: 'تسديد مستحق شريك', created_at: now, created_by: s.user.id }; }
+    } else if (type === 'capital_contribution') {
+      const paymentRef = push(ref(db, 'partner_payments')); const payment = { id: paymentRef.key, partner_id: partner.id, partner_name: partner.name, amount: value, date, month, payment_method: payload.payment_method || 'cash', cash_account_id: payload.cash_account_id || 'cashier', operation_key: operationKey, notes: op.notes, created_at: now, created_by: s.user.id }; updates[`partner_payments/${payment.id}`] = payment;
+      if (payload.cash_received === true && String(payload.payment_method || 'cash') === 'cash') { const cashRef = push(ref(db, 'cash_movements')); updates[`cash_movements/${cashRef.key}`] = { id: cashRef.key, type: 'IN', amount: value, cash_account_id: payment.cash_account_id, date, month, payment_method: 'cash', source_type: 'partner_capital', source_id: payment.id, source_key: `partner_capital:${operationKey}`, operation_key: operationKey, reason: 'مساهمة رأس مال شريك', created_at: now, created_by: s.user.id }; }
+    } else if (type === 'personal_purchase') {
+      if (!['capital', 'payable'].includes(payload.funding_mode)) throw new Error('اختر زيادة رأس مال أو مبلغ مستحق للشريك.');
+      const destinationType = payload.accounting_class === 'fixed_asset' ? 'assets' : payload.accounting_class === 'supplies' ? 'purchases' : payload.accounting_class === 'setup_cost' ? 'establishment_costs' : 'expenses';
+      const destinationRef = push(ref(db, destinationType));
+      const common = { id: destinationRef.key, source_type: 'partner_personal_purchase', source_id: op.id, source_key: `partner_personal_purchase:${operationKey}`, partner_id: partner.id, partner_name: partner.name, name: op.item_name || op.description, item_name: op.item_name || op.description, description: op.description, amount: value, total: value, date, month, payment_method: 'partner_personal', funding_mode: payload.funding_mode, accounting_class: payload.accounting_class, created_at: now, created_by: s.user.id };
+      if (destinationType === 'assets') updates[`${destinationType}/${destinationRef.key}`] = { ...common, purchase_price: value, asset_category_id: op.asset_category_id, asset_category_name: op.asset_category_name || 'تجهيزات أخرى', asset_subcategory_id: op.asset_subcategory_id || null, asset_subcategory_name: op.asset_subcategory_name || null, status: 'active' };
+      else if (destinationType === 'purchases') updates[`${destinationType}/${destinationRef.key}`] = { ...common, purchase_type: 'inventory', quantity: Number(payload.quantity || 1), unit: payload.unit || '', unit_price: value / Math.max(1, Number(payload.quantity || 1)), total_after_discount: value, paid_amount: 0, remaining_amount: 0 };
+      else if (destinationType === 'establishment_costs') updates[`${destinationType}/${destinationRef.key}`] = { ...common, category_name: payload.subcategory || 'تكاليف تأسيس', paid_amount: 0, remaining_amount: 0, payment_status: 'paid' };
+      else updates[`${destinationType}/${destinationRef.key}`] = { ...common, category_name: payload.subcategory || 'مصروفات', paid_amount: 0, remaining_amount: 0, payment_status: 'paid' };
+      updates[`partner_operations/${op.id}`] = { ...op, destination_type: destinationType, destination_id: destinationRef.key };
+      if (payload.funding_mode === 'payable') { const debtId = `partner:${op.id}`; updates[`debts/${debtId}`] = { id: debtId, type: 'payable', party_type: 'partner', party_id: partner.id, party_name: partner.name, category: payload.subcategory || 'شراء شخصي للشريك', original_amount: value, paid_amount: 0, remaining_amount: value, status: 'unpaid', debt_date: date, month, source_type: 'partner_personal_purchase', source_id: op.id, source_key: `partner_personal_purchase:${operationKey}`, created_at: now, created_by: s.user.id }; updates[`partner_operations/${op.id}`] = { ...op, destination_type: destinationType, destination_id: destinationRef.key, debt_id: debtId }; }
+    } else if (type === 'partner_loan') {
+      const debtId = `partner:${op.id}`; updates[`debts/${debtId}`] = { id: debtId, type: 'payable', party_type: 'partner', party_id: partner.id, party_name: partner.name, category: 'قرض شريك', original_amount: value, paid_amount: 0, remaining_amount: value, status: 'unpaid', debt_date: date, month, source_type: 'partner_loan', source_id: op.id, source_key: `partner_loan:${operationKey}`, created_at: now, created_by: s.user.id }; updates[`partner_operations/${op.id}`] = { ...op, debt_id: debtId };
+      if (payload.cash_received === true) { const cashRef = push(ref(db, 'cash_movements')); updates[`cash_movements/${cashRef.key}`] = { id: cashRef.key, type: 'IN', amount: value, cash_account_id: payload.cash_account_id || 'cashier', date, month, payment_method: payload.payment_method || 'cash', source_type: 'partner_loan', source_id: op.id, source_key: `partner_loan:${operationKey}`, operation_key: operationKey, reason: 'قرض نقدي من شريك', created_at: now, created_by: s.user.id }; }
+    } else if (type === 'partner_withdrawal' && String(payload.payment_method || 'cash') === 'cash') { const cashRef = push(ref(db, 'cash_movements')); updates[`cash_movements/${cashRef.key}`] = { id: cashRef.key, type: 'OUT', amount: value, cash_account_id: payload.cash_account_id || 'cashier', date, month, payment_method: 'cash', source_type: 'partner_withdrawal', source_id: op.id, source_key: `partner_withdrawal:${operationKey}`, operation_key: operationKey, reason: 'مسحوبات شريك', created_at: now, created_by: s.user.id }; }
+    await update(ref(db), updates); await api.logAudit('PARTNER_OPERATION_CREATED', 'partner_operations', op.id, op); return op;
+  },
+  listPartnerOperations: async (partnerId = '') => { await requireSuperAdmin(); const [operations, settlements] = await Promise.all([api.list('partner_operations').catch(() => []), api.list('partner_settlements').catch(() => [])]); return { operations: operations.filter((row) => !row.deleted && (!partnerId || row.partner_id === partnerId)), settlements: settlements.filter((row) => !row.deleted && (!partnerId || row.partner_id === partnerId)) }; },
   saveEstablishmentCategory: async ({ id, name, active = true } = {}) => {
     const s = await requireSuperAdmin(); const value = String(name || '').trim(); if (!value) throw new Error('اسم التصنيف مطلوب.');
     const categoryRef = id ? ref(db, `establishment_categories/${id}`) : push(ref(db, 'establishment_categories')); const old = id ? await api.get(`establishment_categories/${id}`) : null; const now = new Date().toISOString();
     const item = { id: categoryRef.key, name, active: active !== false, created_at: old?.created_at || now, created_by: old?.created_by || s.user.id, updated_at: now, updated_by: s.user.id };
     await set(categoryRef, item); await api.logAudit(old ? 'ESTABLISHMENT_CATEGORY_UPDATED' : 'ESTABLISHMENT_CATEGORY_CREATED', 'establishment_categories', item.id, { before: old, after: item }); return item;
+  },
+  listAssetCategories: async () => {
+    const s = await requirePermission('assets.view');
+    const snap = await get(ref(db, 'asset_categories'));
+    if (!snap.exists()) return [];
+    return Object.keys(snap.val()).map((id) => ({ id, ...snap.val()[id] })).filter((row) => row.deleted !== true);
+  },
+  saveAssetCategory: async ({ id, name, description = '', icon = '', active = true } = {}) => {
+    const s = await requirePermission(id ? 'assets.edit' : 'assets.create');
+    const value = String(name || '').trim();
+    if (!value) throw new Error('اسم قسم الأصول مطلوب.');
+    const existing = await api.listAssetCategories();
+    const normalized = normalizeName(value);
+    const duplicate = existing.find((row) => normalizeName(row.name) === normalized && row.id !== id) || (!id && assetCategoryDefaults.some((defaultName) => normalizeName(defaultName) === normalized) ? { name: value } : null);
+    if (duplicate) throw new Error('يوجد قسم أصول بالاسم نفسه أو بكتابة مكافئة.');
+    const key = id || `custom-${assetCategoryKey(value)}`;
+    const categoryRef = ref(db, `asset_categories/${key}`);
+    const old = id ? await api.get(`asset_categories/${id}`) : null;
+    const now = new Date().toISOString();
+    const item = withoutUndefined({ id: key, name: value, description: String(description || '').trim(), icon: String(icon || '').trim(), active: active !== false, source: old?.source || 'user', created_at: old?.created_at || now, created_by: old?.created_by || s.user.id, updated_at: now, updated_by: s.user.id });
+    await set(categoryRef, item);
+    await api.logAudit(old ? 'ASSET_CATEGORY_UPDATED' : 'ASSET_CATEGORY_CREATED', 'asset_categories', key, { before: old, after: item });
+    return item;
+  },
+  listAssetSubcategories: async (parentId = '') => {
+    await requirePermission('assets.view');
+    const snap = await get(ref(db, 'asset_subcategories'));
+    if (!snap.exists()) return [];
+    return Object.keys(snap.val()).map((id) => ({ id, ...snap.val()[id] })).filter((row) => row.deleted !== true && (!parentId || row.parent_id === parentId));
+  },
+  saveAssetSubcategory: async ({ id, parent_id, name, description = '', active = true } = {}) => {
+    const s = await requirePermission(id ? 'assets.edit' : 'assets.create');
+    const parent = String(parent_id || '').trim(); const value = String(name || '').trim();
+    if (!parent || !value) throw new Error('القسم الرئيسي واسم القسم الفرعي مطلوبان.');
+    const parentExists = (await api.listAssetCategories()).some((row) => row.id === parent && row.active !== false);
+    if (!parentExists) throw new Error('القسم الرئيسي غير موجود أو غير فعال.');
+    const existing = await api.listAssetSubcategories(parent);
+    const duplicate = existing.find((row) => normalizeName(row.name) === normalizeName(value) && row.id !== id);
+    if (duplicate) throw new Error('يوجد قسم فرعي بالاسم نفسه داخل القسم الرئيسي.');
+    const key = id || `${parent}--${assetCategoryKey(value)}`;
+    const old = id ? await api.get(`asset_subcategories/${id}`) : null; const now = new Date().toISOString();
+    const item = withoutUndefined({ id: key, parent_id: parent, name: value, description: String(description || '').trim(), active: active !== false, created_at: old?.created_at || now, created_by: old?.created_by || s.user.id, updated_at: now, updated_by: s.user.id });
+    await set(ref(db, `asset_subcategories/${key}`), item);
+    await api.logAudit(old ? 'ASSET_SUBCATEGORY_UPDATED' : 'ASSET_SUBCATEGORY_CREATED', 'asset_subcategories', key, { before: old, after: item });
+    return item;
   },
   listEstablishmentCosts: async () => {
     await requireSuperAdmin(); const [costs, categories] = await Promise.all([api.list('establishment_costs'), api.list('establishment_categories')]);
@@ -616,6 +834,230 @@ export const api = {
     rows.forEach((row) => { const item = {}; Object.entries(mapping).forEach(([source, target]) => { if (target) item[target] = row[source]; }); const rawCategory = String(item.category || item.category_name || item.categoryAr || '').trim(); if (rawCategory) { item.category_id = categoryCache.get(normalizeName(rawCategory)) || slug(rawCategory); delete item.category; delete item.category_name; delete item.categoryAr; } item.name_ar = item.name_ar || item.nameAr || ''; item.name_en = item.name_en || item.nameEn || ''; item.selling_price = Number(item.selling_price ?? item.sellingPrice ?? 0) || 0; delete item.nameAr; delete item.nameEn; delete item.sellingPrice; const name = nameOf(item); if (!name || !item.category_id) { invalid++; return; } const key = `${categoryOf(item)}|${name}`; if (seen.has(key)) { skipped++; return; } const id = push(ref(db, entity)).key; item.id = id; item.active = true; item.import_batch_id = batchId; item.source_filename = filename; item.created_at = new Date().toISOString(); item.created_by = s.user.id; updates[`${entity}/${id}`] = item; seen.add(key); inserted++; });
     const batch = { filename, sheet: sheet || 'Sheet1', entity, mapping, created_at: new Date().toISOString(), created_by: s.user.id, total_rows: rows.length, valid_rows: inserted + skipped, inserted_rows: inserted, skipped_rows: skipped, invalid_rows: invalid, status: 'COMPLETED' };
     updates[`imports/${batchId}`] = { id: batchId, ...batch }; await update(ref(db), updates); await api.logAudit('IMPORT', entity, batchId, batch); return { batchId, ...batch };
+  },
+  importAssetBatch: async ({ filename, sheet = 'ورقة1', rows = [] } = {}) => {
+    const emulatorOnly = (typeof process !== 'undefined' && process.env.FIREBASE_EMULATOR_HOST) || (typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname));
+    if (!emulatorOnly) throw new Error('استيراد الأصول التاريخية محصور ببيئة Emulator المحلية.');
+    const s = await requirePermission('excel.import');
+    if (!canManage(s)) throw new Error('غير مصرح باستيراد الأصول.');
+    const batchRef = push(ref(db, 'imports'));
+    const batchId = batchRef.key;
+    const now = new Date().toISOString();
+    const existing = await api.list('assets');
+    const existingKeys = new Set(existing.map((row) => row.import_key).filter(Boolean));
+    const updates = {};
+    let inserted = 0, skipped = 0, invalid = 0;
+    rows.forEach((row) => {
+      const key = String(row.import_key || '').trim();
+      const amount = Number(row.total);
+      if (!key || !row.name || !Number.isFinite(amount)) { invalid++; return; }
+      if (existingKeys.has(key)) { skipped++; return; }
+      const id = push(ref(db, 'assets')).key;
+      updates[`assets/${id}`] = {
+        id,
+        name: String(row.name).trim(),
+        category: String(row.category || 'بنود تحتاج مراجعة').trim(),
+        accounting_class: row.accounting_class || 'review',
+        review_required: row.review_required === true || row.accounting_class === 'review',
+        quantity: row.quantity == null ? null : Number(row.quantity),
+        unit_price: row.unit_price == null ? null : Number(row.unit_price),
+        total: amount,
+        purchase_price: amount,
+        purchase_date: row.purchase_date || null,
+        notes: String(row.notes || '').trim(),
+        source_filename: filename,
+        source_sheet: sheet,
+        source_row: Number(row.source_row),
+        import_key: key,
+        import_batch_id: batchId,
+        owner_approval_note: row.owner_approval_note || null,
+        status: 'active',
+        created_at: now,
+        created_by: s.user.id,
+      };
+      existingKeys.add(key);
+      inserted++;
+    });
+    const batch = {
+      id: batchId, filename, sheet, entity: 'assets', import_type: 'historical_asset_opening',
+      total_rows: rows.length, valid_rows: inserted + skipped, inserted_rows: inserted,
+      skipped_rows: skipped, invalid_rows: invalid, status: 'COMPLETED', created_at: now, created_by: s.user.id,
+      owner_approval: { source_row: 36, amount: 6889000, note: 'اعتمد المالك الإجمالي المكتوب في E36 رغم اختلافه عن حاصل ضرب الكمية بالسعر؛ لا يُسجل الفرق كبند مستقل.' },
+    };
+    updates[`imports/${batchId}`] = batch;
+    await update(ref(db), updates);
+    await api.logAudit('IMPORT_ASSETS', 'assets', batchId, batch);
+    return { batchId, ...batch };
+  },
+  importHistoricalBatch: async ({ filename, rows = [], excluded = false } = {}) => {
+    const s = await requirePermission('excel.import');
+    if (!canManage(s)) throw new Error('غير مصرح بالاستيراد التاريخي.');
+    const existing = await api.list('historical_imports').catch(() => []);
+    const existingKeys = new Set(existing.map((row) => row.import_key).filter(Boolean));
+    const batchRef = push(ref(db, 'imports')); const batchId = batchRef.key; const now = new Date().toISOString(); const updates = {};
+    let inserted = 0, skipped = 0, invalid = 0;
+    for (const row of rows) {
+      const key = String(row.import_key || '').trim();
+      if (!key || !row.name || !Number.isFinite(Number(row.amount))) { invalid++; continue; }
+      if (existingKeys.has(key)) { skipped++; continue; }
+      const id = key.replace(/[^a-zA-Z0-9_-]/g, '_').slice(-120) || push(ref(db, 'historical_imports')).key;
+      const item = withoutUndefined({ ...row, id, amount: Number(row.amount), import_batch_id: batchId, created_at: now, created_by: s.user.id, excluded_from_month_totals: row.duplicate_status !== 'clear', status: row.status || 'active' });
+      updates[`historical_imports/${id}`] = item; existingKeys.add(key); inserted++;
+    }
+    const batch = { id: batchId, filename, entity: 'historical_imports', import_type: 'historical_finance_unified', total_rows: rows.length, inserted_rows: inserted, skipped_rows: skipped, invalid_rows: invalid, excluded, status: 'COMPLETED', created_at: now, created_by: s.user.id };
+    updates[`imports/${batchId}`] = batch;
+    await update(ref(db), updates); await api.logAudit('IMPORT_HISTORICAL_FINANCE', 'historical_imports', batchId, batch);
+    return { batchId, ...batch };
+  },
+  updateHistoricalImport: async (id, patch = {}) => {
+    const s = await requirePermission('excel.import'); if (!canManage(s)) throw new Error('غير مصرح بتعديل الاستيراد التاريخي.');
+    const old = await api.get(`historical_imports/${id}`); if (!old) throw new Error('السجل التاريخي غير موجود.');
+    const next = { ...old };
+    const now = new Date().toISOString();
+    if (Object.prototype.hasOwnProperty.call(patch, 'month')) {
+      const month = patch.month == null || patch.month === '' ? null : String(patch.month);
+      if (month && !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error('الشهر غير صحيح.');
+      next.month = month; next.accounting_month = month; next.month_source = patch.month_source || next.month_source || 'owner_default';
+      next.without_month = !month; next.month_assigned_at = month ? now : null; next.month_assigned_by = month ? s.user.id : null;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'accounting_class')) {
+      const accountingClass = String(patch.accounting_class || 'review').trim();
+      if (accountingClass !== 'review' && !historicalSupportedClasses.has(accountingClass)) throw new Error('التصنيف غير مدعوم بالنقل التاريخي.');
+      next.accounting_class = accountingClass; next.classification_updated_at = now; next.classification_updated_by = s.user.id;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'proposed_category')) next.proposed_category = String(patch.proposed_category || '').trim();
+    if (Object.prototype.hasOwnProperty.call(patch, 'asset_category_id')) next.asset_category_id = patch.asset_category_id == null || patch.asset_category_id === '' ? null : String(patch.asset_category_id);
+    if (Object.prototype.hasOwnProperty.call(patch, 'notes')) next.notes = String(patch.notes || '').trim();
+    next.review_required = classificationReviewState(next.accounting_class);
+    next.classification_review_status = next.review_required ? 'needs_review' : 'approved';
+    next.updated_at = now; next.updated_by = s.user.id;
+
+    const [assets, expenses, purchases, establishmentCosts] = await Promise.all([
+      api.list('assets').catch(() => []), api.list('expenses').catch(() => []), api.list('purchases').catch(() => []), api.list('establishment_costs').catch(() => []),
+    ]);
+    const existingDestinations = { assets, expenses, purchases, establishment_costs: establishmentCosts };
+    const linkedEntries = Object.entries(existingDestinations).flatMap(([type, records]) => records.filter((record) => record.historical_import_id === id || record.source_id === id || (next.import_key && record.import_key === next.import_key)).map((record) => ({ type, record })));
+    const destinationId = next.destination_id || linkedEntries.find(({ type }) => type === historicalDestinationMap[next.accounting_class])?.record.id || historicalDestinationId(id);
+    const destinationType = historicalDestinationMap[next.accounting_class];
+    const updates = {};
+    for (const { type, record } of linkedEntries) {
+      if (type === destinationType && record.id === destinationId) continue;
+      updates[`${type}/${record.id}`] = { ...record, status: 'classified_elsewhere', deleted: true, classification_status: 'classified_elsewhere', archived_at: now, archived_by: s.user.id, updated_at: now, updated_by: s.user.id };
+    }
+    if (destinationType) {
+      next.destination_type = destinationType; next.destination_id = destinationId;
+      if (destinationType === 'assets') next.asset_id = destinationId;
+      const existing = existingDestinations[destinationType].find((record) => record.id === destinationId) || linkedEntries.find(({ type }) => type === destinationType)?.record;
+      updates[`${destinationType}/${destinationId}`] = historicalDestinationPayload({ historical: next, destinationType, id: destinationId, existing, session: s, now });
+    } else {
+      next.destination_type = null; next.destination_id = null; next.asset_id = null;
+    }
+    updates[`historical_imports/${id}`] = withoutUndefined(next);
+    await update(ref(db), updates);
+    await api.logAudit('HISTORICAL_IMPORT_UPDATED', 'historical_imports', id, { month: next.month || null, accounting_class: next.accounting_class, destination_type: next.destination_type || null, destination_id: next.destination_id || null, duplicate_status: next.duplicate_status || 'clear' });
+    return next;
+  },
+  repairHistoricalDestinations: async () => {
+    const s = await requirePermission('excel.import'); if (!canManage(s)) throw new Error('غير مصرح بإصلاح وجهات الاستيراد التاريخي.');
+    const [historical, assets, expenses, purchases, establishmentCosts] = await Promise.all([
+      api.list('historical_imports'), api.list('assets'), api.list('expenses').catch(() => []), api.list('purchases').catch(() => []), api.list('establishment_costs').catch(() => []),
+    ]);
+    const destinations = { assets, expenses, purchases, establishment_costs: establishmentCosts };
+    const destinationByClass = { fixed_asset: 'assets', expense: 'expenses', supplies: 'expenses', purchase: 'purchases', setup_cost: 'establishment_costs' };
+    const candidates = historical.filter((row) => {
+      const destinationType = destinationByClass[row.accounting_class];
+      if (row.status === 'void' || !destinationType) return false;
+      // Duplicate review remains independent. A suspected duplicate must never
+      // create a financial destination merely because its class is approved.
+      if (['suspected', 'existing'].includes(row.duplicate_status)) return false;
+      const expectedId = row.destination_id || (row.accounting_class === 'fixed_asset' ? row.asset_id : null) || historicalDestinationId(row.id);
+      const linked = (destinations[destinationType] || []).find((item) => item.id === expectedId || item.historical_import_id === row.id || item.source_id === row.id || (row.import_key && item.import_key === row.import_key));
+      return row.destination_type !== destinationType || row.destination_id !== expectedId || !linked || linked.deleted || linked.status === 'classified_elsewhere';
+    });
+    for (const row of candidates) await api.updateHistoricalImport(row.id, {});
+    if (candidates.length) await api.logAudit('HISTORICAL_DESTINATIONS_REPAIRED', 'historical_imports', 'destination-links', { repaired: candidates.length });
+    return { repaired: candidates.length, skipped_duplicate_review: historical.filter((row) => ['suspected', 'existing'].includes(row.duplicate_status) && destinationByClass[row.accounting_class]).length };
+  },
+  repairHistoricalAssets: async () => {
+    const s = await requirePermission('excel.import'); if (!canManage(s)) throw new Error('غير مصرح بإصلاح روابط الأصول التاريخية.');
+    const [historical, assets] = await Promise.all([api.list('historical_imports'), api.list('assets')]);
+    const now = new Date().toISOString(); const updates = {}; let repaired = 0;
+    historical.filter((row) => row.status !== 'void').forEach((row) => {
+      const linked = findHistoricalAsset(assets, row);
+      if (row.accounting_class === 'fixed_asset') {
+        const assetId = linked?.id || row.asset_id || historicalAssetId(row.id);
+        const asset = historicalAssetPayload({ historical: { ...row, asset_id: assetId }, assetId, existing: linked, session: s, now, status: 'active' });
+        if (!linked || linked.status !== 'active' || linked.accounting_class !== row.accounting_class || linked.total !== asset.total || row.asset_id !== assetId) repaired++;
+        updates[`assets/${assetId}`] = asset;
+        if (row.asset_id !== assetId) updates[`historical_imports/${row.id}/asset_id`] = assetId;
+      } else if (linked && linked.status !== 'classified_elsewhere') {
+        repaired++; updates[`assets/${linked.id}/status`] = 'classified_elsewhere'; updates[`assets/${linked.id}/accounting_class`] = row.accounting_class || 'review'; updates[`assets/${linked.id}/updated_at`] = now; updates[`assets/${linked.id}/updated_by`] = s.user.id;
+      }
+    });
+    for (const [path, value] of Object.entries(updates)) await set(ref(db, path), value);
+    if (repaired) await api.logAudit('HISTORICAL_ASSETS_REPAIRED', 'historical_imports', 'asset-links', { repaired });
+    return { repaired };
+  },
+  repairHistoricalClassificationState: async () => {
+    const s = await requirePermission('excel.import'); if (!canManage(s)) throw new Error('غير مصرح بإصلاح حالة مراجعة التصنيف.');
+    const rows = await api.list('historical_imports'); const updates = {}; const now = new Date().toISOString(); let repaired = 0;
+    rows.filter((row) => row.status !== 'void').forEach((row) => {
+      const reviewRequired = classificationReviewState(row.accounting_class);
+      const reviewStatus = reviewRequired ? 'needs_review' : 'approved';
+      if (row.review_required !== reviewRequired || row.classification_review_status !== reviewStatus) {
+        updates[`historical_imports/${row.id}/review_required`] = reviewRequired;
+        updates[`historical_imports/${row.id}/classification_review_status`] = reviewStatus;
+        updates[`historical_imports/${row.id}/classification_updated_at`] = row.classification_updated_at || now;
+        updates[`historical_imports/${row.id}/classification_updated_by`] = row.classification_updated_by || s.user.id;
+        repaired++;
+      }
+    });
+    for (const [path, value] of Object.entries(updates)) await set(ref(db, path), value);
+    if (repaired) await api.logAudit('HISTORICAL_CLASSIFICATION_STATE_REPAIRED', 'historical_imports', 'classification-state', { repaired });
+    return { repaired };
+  },
+  historicalImportSummary: async () => {
+    await requirePermission('excel.import');
+    const rows = await api.list('historical_imports');
+    const active = rows.filter((row) => row.status !== 'void');
+    const isDuplicate = (row) => row.duplicate_status === 'suspected' || row.duplicate_status === 'existing';
+    const imported = active.filter((row) => !isDuplicate(row));
+    const unresolved = imported.filter((row) => !row.month);
+    const suspected = active.filter(isDuplicate);
+    const fixedAssets = imported.filter((row) => row.accounting_class === 'fixed_asset');
+    const purchases = imported.filter((row) => row.accounting_class === 'purchase');
+    const setupMaterials = imported.filter((row) => ['setup_cost', 'supplies', 'expense'].includes(row.accounting_class));
+    const total = (items) => items.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+    return { rows: active, withoutMonth: unresolved, suspected, imported, totals: { importedCount: imported.length, importedValue: total(imported), fixedAssetCount: fixedAssets.length, fixedAssetValue: total(fixedAssets), purchaseCount: purchases.length, purchaseValue: total(purchases), setupMaterialsCount: setupMaterials.length, setupMaterialsValue: total(setupMaterials), withoutMonthCount: unresolved.length, withoutMonthValue: total(unresolved), suspectedCount: suspected.length, suspectedValue: total(suspected) } };
+  },
+  auditCenterSnapshot: async () => {
+    await requirePermission('audit.view');
+    await requirePermission('excel.import');
+    const readCollection = async (path) => {
+      try {
+        const snap = await get(ref(db, path));
+        if (!snap.exists()) return { rows: [], denied: false };
+        const value = snap.val();
+        return { rows: Object.entries(value || {}).map(([id, row]) => ({ id, ...(row || {}) })), denied: false };
+      } catch (error) {
+        return { rows: [], denied: true, code: error?.code || 'READ_FAILED' };
+      }
+    };
+    const paths = ['historical_imports', 'assets', 'expenses', 'purchases', 'establishment_costs', 'sales', 'cash_movements', 'inventory_movements', 'audit'];
+    const loaded = Object.fromEntries(await Promise.all(paths.map(async (path) => [path, await readCollection(path)])));
+    const unavailable = paths.filter((path) => loaded[path].denied);
+    return buildAuditSnapshot({
+      historical: loaded.historical_imports.rows,
+      assets: loaded.assets.rows,
+      expenses: loaded.expenses.rows,
+      purchases: loaded.purchases.rows,
+      establishment_costs: loaded.establishment_costs.rows,
+      sales: loaded.sales.rows,
+      cash_movements: loaded.cash_movements.rows,
+      inventory_movements: loaded.inventory_movements.rows,
+      audit: loaded.audit.rows,
+      unavailable,
+    });
   },
   previewLegacyMonthlyImport: async (data) => {
     const s = await requirePermission('excel.import'); if (!canManage(s)) throw new Error('غير مصرح بالاستيراد.');
@@ -1713,8 +2155,10 @@ export const api = {
     const advancesResult = getMonthlyLegacyWithdrawals({ payroll, advances, month: selectedMonth });
     const salesTotal = salesResult.total, expenseTotal = expensesResult.total;
     const salesBreakdown = getMonthlySalesBreakdown({ transactions: sal, legacySummaries, month: selectedMonth });
-    const netProfitBeforePayroll = getMonthlyProfit({ sales: salesResult, otherIncome: otherIncomeResult, purchases: purchaseMetric, expenses: expensesResult, payroll: { total: 0 } });
-    const netProfitAfterPayroll = getMonthlyProfit({ sales: salesResult, otherIncome: otherIncomeResult, purchases: purchaseMetric, expenses: expensesResult, payroll: payrollResult });
+    // Purchases are procurement cash-flow data, not COGS. Until sale-level
+    // inventory cost is linked and complete, profitability must remain blank.
+    const netProfitBeforePayroll = null;
+    const netProfitAfterPayroll = null;
     const immediateCashPurchases = getImmediateCashPurchasePaid(resolvedPurchases);
     const [selectedYear, selectedMonthNumber] = String(selectedMonth || currentMonth()).split('-').map(Number);
     const daysInSelectedMonth = Number.isFinite(selectedYear) && Number.isFinite(selectedMonthNumber)
@@ -1725,11 +2169,15 @@ export const api = {
       const key = `${selectedYear}-${String(selectedMonthNumber).padStart(2, '0')}-${String(dayNumber).padStart(2, '0')}`;
       const daySales = monthSal.filter((row) => String(row.date || '').slice(0, 10) === key);
       const dayPurchases = monthPur.filter((row) => String(row.date || '').slice(0, 10) === key);
+      const dayExpenses = monthExp.filter((row) => String(row.date || '').slice(0, 10) === key);
+      const dayOtherIncome = otherIncome.filter((row) => String(row.date || '').slice(0, 10) === key);
       const dayBreakdown = getMonthlySalesBreakdown({ transactions: daySales, legacySummaries: [], month: selectedMonth });
       return {
         day: String(dayNumber), date: key,
         revenue: daySales.reduce((total, row) => total + getSalesTransactionNet(row), 0),
         purchases: dayPurchases.reduce((total, row) => total + amountOf(row, 'total_price'), 0),
+        expenses: dayExpenses.reduce((total, row) => total + amountOf(row, 'amount'), 0),
+        otherIncome: dayOtherIncome.reduce((total, row) => total + amountOf(row, 'amount'), 0),
         salesCount: daySales.length, purchaseCount: dayPurchases.length,
         cashSales: dayBreakdown.cash, electronicSales: dayBreakdown.electronic,
         reviewCount: daySales.filter((row) => resolvePaymentMethod(row.payment_method) === 'unknown').length,
@@ -1751,7 +2199,7 @@ export const api = {
         todayBestProduct: canSeeRevenue ? (() => { const grouped = {}; monthSal.filter(x=>getRecordDate(x)===todayKey).forEach(x => { const key = x.product_name || x.item || x.product_id || 'منتج'; const current = grouped[key] || { quantity: 0, revenue: 0 }; grouped[key] = { quantity: current.quantity + Number(x.quantity || 0), revenue: current.revenue + getSalesTransactionNet(x) }; }); return Object.entries(grouped).sort((a,b)=>b[1].quantity-a[1].quantity || b[1].revenue-a[1].revenue || a[0].localeCompare(b[0]))[0]?.[0] || null; })() : null,
         todayExpectedCash: canSeeRevenue ? cashResult.total : null,
         operationCount: monthSal.length + monthPur.length + monthExp.length,
-        revenue: canSeeRevenue ? salesTotal : null, grossSales: canSeeRevenue ? salesResult.gross : null, discounts: canSeeRevenue ? salesResult.discount : null, cashSales: canSeeRevenue ? salesBreakdown.cash : null, electronicSales: canSeeRevenue ? salesBreakdown.electronic : null, otherNonCashSales: canSeeRevenue ? salesBreakdown.otherNonCash : null, unclassifiedSales: canSeeRevenue ? salesBreakdown.unclassified : null, otherIncome: canSeeRevenue ? otherIncomeResult.total : null, purchases: canSeeRevenue ? purchaseTotal : null, cashPaidPurchases: canSeeRevenue ? immediateCashPurchases : null, expenses: canSeeRevenue ? expenseTotal : null, netProfitBeforePayroll: canSeeRevenue ? netProfitBeforePayroll : null, netProfitAfterPayroll: canSeeRevenue ? netProfitAfterPayroll : null, netProfit: canSeeRevenue ? netProfitAfterPayroll : null,
+        revenue: canSeeRevenue ? salesTotal : null, grossSales: canSeeRevenue ? salesResult.gross : null, discounts: canSeeRevenue ? salesResult.discount : null, cashSales: canSeeRevenue ? salesBreakdown.cash : null, electronicSales: canSeeRevenue ? salesBreakdown.electronic : null, otherNonCashSales: canSeeRevenue ? salesBreakdown.otherNonCash : null, unclassifiedSales: canSeeRevenue ? salesBreakdown.unclassified : null, otherIncome: canSeeRevenue ? otherIncomeResult.total : null, purchases: canSeeRevenue ? purchaseTotal : null, cashPaidPurchases: canSeeRevenue ? immediateCashPurchases : null, expenses: canSeeRevenue ? expenseTotal : null, operatingExpenses: canSeeRevenue ? expenseTotal : null, cogs: null, grossProfit: null, netProfitBeforePayroll: canSeeRevenue ? netProfitBeforePayroll : null, netProfitAfterPayroll: canSeeRevenue ? netProfitAfterPayroll : null, netProfit: null, profitabilityStatus: 'incomplete_missing_cogs',
         payrollDue, payrollPaid, payrollRemaining: payrollDue == null || payrollPaid == null ? null : Math.max(0, payrollDue - payrollPaid), payrollSource: payrollResult.source, employeeAdvances: advancesResult.total, employeeAdvancesSource: advancesResult.source, cashNet: cashResult.total,
         purchaseCount: monthPur.length, expenseCount: monthExp.length, categoryCount: catCount, productCount: prodCount, materialCount: matCount,
         purchaseComparison: canSeeRevenue ? (purchaseTotal && priorResolvedPurchases.length ? Math.round((purchaseTotal - priorResolvedPurchases.reduce((n, row) => n + row.total, 0)) / priorResolvedPurchases.reduce((n, row) => n + row.total, 0) * 100) : null) : null,
@@ -1769,15 +2217,16 @@ export const api = {
       api.list('other_income').catch(() => []), api.list('payroll_payments').catch(() => []), api.list('materials').catch(() => []), api.listDebts('all').catch(() => []), api.list('debt_payments').catch(() => [])
     ]);
     const inRange = (rows) => range?.mode === 'custom' ? filterRecordsByDateRange(rows, range) : recordsForMonth(rows, range?.month || 'all');
-    const salesRows = inRange(sales), purchaseRows = resolvePurchaseRows({ purchases, invoices: purchaseInvoices, month: range.mode === 'month' ? range.month : 'all' }).filter((row) => range.mode === 'custom' ? inRange([row]).length : true), expenseRows = inRange(expenses).filter((row) => !row.establishment_reclassified), incomeRows = inRange(otherIncome), paymentRows = inRange(payrollPayments);
+    const salesRows = inRange(sales), purchaseRows = resolvePurchaseRows({ purchases, invoices: purchaseInvoices, month: range.mode === 'month' ? range.month : 'all' }).filter((row) => range.mode === 'custom' ? inRange([row]).length : true), expenseRows = inRange(expenses).filter((row) => !row.establishment_reclassified), operatingExpenseRows = expenseRows.filter((row) => !['fixed_asset', 'setup_cost'].includes(row.accounting_class)), incomeRows = inRange(otherIncome), paymentRows = inRange(payrollPayments);
     const salesTotal = salesRows.reduce((n, row) => n + getSalesTransactionNet(row), 0);
     const salesDiscount = salesRows.reduce((n, row) => n + Number(row.discount_amount ?? row.discount ?? 0), 0);
     const purchaseTotal = purchaseRows.reduce((n, row) => n + Number(row.total_after_discount ?? row.total_price ?? row.amount ?? 0), 0);
     const purchasePaid = purchaseRows.reduce((n, purchase) => { const linkedPayments = paymentRows.filter((row) => row.invoice_id && row.invoice_id === purchase.id); return n + (linkedPayments.length ? linkedPayments.reduce((total, row) => total + Number(row.amount || 0), 0) : Number(purchase.paid_amount ?? purchase.paid ?? 0)); }, 0);
     const expenseTotal = expenseRows.reduce((n, row) => n + Number(row.amount ?? row.total ?? 0), 0);
+    const operatingExpenseTotal = operatingExpenseRows.reduce((n, row) => n + Number(row.amount ?? row.total ?? 0), 0);
     const otherIncomeTotal = incomeRows.reduce((n, row) => n + Number(row.amount || 0), 0);
     const payrollTotal = paymentRows.reduce((n, row) => n + Number(row.amount || 0), 0);
-    const expensesByCategory = expenseRows.reduce((out, row) => { const key = row.category_name || row.category || 'أخرى'; out[key] = (out[key] || 0) + Number(row.amount ?? row.total ?? 0); return out; }, {});
+    const expensesByCategory = operatingExpenseRows.reduce((out, row) => { const key = row.category_name || row.category || 'أخرى'; out[key] = (out[key] || 0) + Number(row.amount ?? row.total ?? 0); return out; }, {});
     const endDate = range?.mode === 'custom' ? range.toDate : `${range?.month || currentMonth()}-31`;
     const startDate = range?.mode === 'custom' ? range.fromDate : `${range?.month || currentMonth()}-01`;
     const debtsAsOf = debtRows.filter((row) => String(row.debt_date || row.date || '').slice(0, 10) <= endDate).map((row) => {
@@ -1795,7 +2244,7 @@ export const api = {
     const debtSummary = { payable: debtPayable, receivable: debtReceivable, overduePayable, overdueReceivable, settledDuringRange: debtSettlementRows.reduce((n, row) => n + Number(row.amount || 0), 0) };
     return {
       range, rows: { sales: salesRows, purchases: purchaseRows, expenses: expenseRows, otherIncome: incomeRows, payroll: paymentRows, inventory: materials.filter((row) => !row.deleted), debts: debtsAsOf, debtPayments: debtSettlementRows },
-      summary: { sales: salesTotal, discounts: salesDiscount, netSales: salesTotal, purchases: purchaseTotal, purchasePaid, purchaseRemaining: Math.max(0, purchaseTotal - purchasePaid), expenses: expenseTotal, otherIncome: otherIncomeTotal, payrollPayments: payrollTotal, netResult: salesTotal + otherIncomeTotal - purchaseTotal - expenseTotal - payrollTotal, expenseBreakdown: expensesByCategory, debtsPayable: debtSummary.payable, debtsReceivable: debtSummary.receivable, overduePayable: debtSummary.overduePayable, overdueReceivable: debtSummary.overdueReceivable, debtSettledDuringRange: debtSummary.settledDuringRange }
+      summary: { sales: salesTotal, discounts: salesDiscount, netSales: salesTotal, purchases: purchaseTotal, purchasePaid, purchaseRemaining: Math.max(0, purchaseTotal - purchasePaid), expenses: expenseTotal, operatingExpenses: operatingExpenseTotal, otherIncome: otherIncomeTotal, payrollPayments: payrollTotal, cogs: null, grossProfit: null, netProfit: null, netResult: null, profitabilityStatus: 'incomplete_missing_cogs', expenseBreakdown: expensesByCategory, debtsPayable: debtSummary.payable, debtsReceivable: debtSummary.receivable, overduePayable: debtSummary.overduePayable, overdueReceivable: debtSummary.overdueReceivable, debtSettledDuringRange: debtSummary.settledDuringRange }
     };
   },
   productCost: async (id) => ({ total: 0, items: [] }),

@@ -63,6 +63,7 @@ export const isDateInRange = (value, range = {}) => {
 export const filterRecordsByDateRange = (records = [], range = {}) => records.filter((record) => !record.deleted && isDateInRange(record.date || record.payment_date || record.paymentDate, range));
 
 export const getRecordMonth = (record = {}) => {
+  if (record.without_month === true) return '';
   const explicit = record.month || record.import_month || record.period || record.financial_month;
   if (explicit && /^\d{4}-\d{1,2}$/.test(String(explicit))) return String(explicit).replace(/-(\d)$/, '-0$1');
   const date = normalizeDate(record.date || record.payment_date || record.paymentDate || record.created_at || record.createdAt);
