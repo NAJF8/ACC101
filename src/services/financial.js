@@ -353,9 +353,62 @@ export const monthLabel = (month) => month === 'all' ? 'جميع الأشهر' :
 export const compare = (current, prior) => prior > 0 ? Math.round(((current - prior) / prior) * 100) : null;
 
 export const getAvailableMonths = (collections = []) => {
-  const months = new Set([currentMonth()]);
+  const months = new Set();
   collections.flat().forEach((record) => { const month = getRecordMonth(record); if (month) months.add(month); });
   return [...months].sort().reverse();
+};
+
+// A financial operation can be mirrored into several read models (for example
+// a purchase, its cash movement, and an historical source row). Keep identity
+// resolution here so every report uses the same accounting count.
+export const financialOperationIdentity = (row = {}, source = '') => {
+  const stable = row.operation_id || row.operation_key || row.source_key || row.source_id || row.historical_import_id;
+  return stable ? String(stable) : `${source}:${row.id || row.key || ''}`;
+};
+
+export const financialPaidAmount = (row = {}, source = '') => {
+  if (source === 'cash_movements') return Math.max(0, Number(row.amount || 0));
+  if (source === 'payroll_payments') return Math.max(0, Number(row.amount || 0));
+  if (source === 'payroll') return Math.max(0, Number(row.paid_amount ?? row.paid ?? 0));
+  if (source === 'establishment_costs') return Math.max(0, Number(row.paid_amount ?? (row.payment_status === 'unpaid' ? 0 : row.amount) ?? 0));
+  if (source === 'purchases') return Math.max(0, Number(row.paid_amount ?? row.paid ?? (row.payment_status === 'unpaid' ? 0 : purchaseRecordTotal(row))));
+  if (source === 'expenses') return Math.max(0, Number(row.paid_amount ?? (row.payment_status === 'unpaid' ? 0 : amountOf(row))));
+  return Math.max(0, Number(row.paid_amount ?? row.amount ?? row.total ?? 0));
+};
+
+export const buildMonthlyFinancialAggregation = ({ sources = {}, month = 'all' } = {}) => {
+  const priority = ['expenses', 'purchases', 'assets', 'establishment_costs', 'payroll_payments', 'payroll', 'cash_movements', 'historical_imports'];
+  const candidates = priority.flatMap((source) => (sources[source] || []).map((row) => ({ ...row, __source: source })));
+  const representedReferences = new Set(candidates.filter((row) => row.__source !== 'cash_movements').flatMap((row) => [row.id, row.key, row.operation_id, row.operation_key, row.source_key, row.source_id, row.historical_import_id].filter(Boolean).map(String)));
+  const seen = new Map();
+  const rows = [];
+  const duplicateKeys = new Set();
+  candidates.filter((row) => !row.deleted && (row.__source !== 'cash_movements' || cashMovementDirection(row) < 0) && (!month || month === 'all' || getRecordMonth(row) === month)).forEach((row) => {
+    const identity = row.__source === 'payroll_payments'
+      ? `payroll:${row.payroll_id || row.id || row.key || ''}`
+      : row.__source === 'payroll'
+        ? `payroll:${row.id || row.key || ''}`
+        : financialOperationIdentity(row, row.__source);
+    const existing = seen.get(identity);
+    if (row.__source === 'cash_movements' && [row.source_id, row.source_key, row.operation_id, row.operation_key].filter(Boolean).some((value) => representedReferences.has(String(value)))) {
+      duplicateKeys.add(identity);
+      return;
+    }
+    if (existing) {
+      duplicateKeys.add(identity);
+      // Cash movement/payroll payment rows are mirrors when their source is
+      // already represented. Do not add their amount twice.
+      return;
+    }
+    seen.set(identity, row);
+    const accountingClass = row.accounting_class || (row.__source === 'assets' ? 'fixed_asset' : row.__source === 'purchases' ? 'supplies' : row.__source === 'payroll' || row.__source === 'payroll_payments' ? 'payroll' : row.__source === 'establishment_costs' ? 'setup_cost' : 'operating_expense');
+    rows.push({ ...row, accounting_class: accountingClass, amount_display: financialPaidAmount(row, row.__source), source_display: row.__source, operation_identity: identity });
+  });
+  const active = rows.filter((row) => row.amount_display > 0 || row.__source === 'payroll');
+  const total = (predicate = () => true) => active.filter(predicate).reduce((n, row) => n + row.amount_display, 0);
+  const categories = active.reduce((out, row) => { const key = row.accounting_class === 'fixed_asset' ? 'أصول وتجهيزات' : row.accounting_class === 'payroll' ? 'رواتب وأجور' : row.__category || row.category_name || row.category || (row.__source === 'purchases' ? 'مواد غذائية وحلويات' : 'أخرى'); const bucket = out[key] || { name: key, count: 0, total: 0 }; bucket.count += 1; bucket.total += row.amount_display; out[key] = bucket; return out; }, {});
+  const hasStableIdentity = (row) => row.operation_id || row.operation_key || row.source_key || row.source_id || row.historical_import_id || row.__source === 'payroll_payments' && row.payroll_id;
+  return { rows: active, record_count: active.length, cash_outflow: total(), operating_expenses: total((row) => row.accounting_class === 'operating_expense' || row.accounting_class === 'expense'), purchases: total((row) => ['purchase', 'supplies'].includes(row.accounting_class) || row.__source === 'purchases'), payroll: total((row) => row.accounting_class === 'payroll'), assets: total((row) => row.accounting_class === 'fixed_asset'), other: total((row) => !['operating_expense', 'expense', 'purchase', 'supplies', 'payroll', 'fixed_asset'].includes(row.accounting_class)), categories: Object.values(categories).filter((item) => item.total > 0), duplicates: duplicateKeys.size, unresolved: active.filter((row) => !getRecordMonth(row) || !hasStableIdentity(row)).length };
 };
 
 export const calculatePayroll = (payroll = {}, adjustments = [], payments = [], employee) => {

@@ -1979,7 +1979,7 @@ export const api = {
 
   availableMonths: async () => {
     const session = await requirePermission('dashboard.view');
-    const entities = ['purchases', 'expenses', 'sales', 'other_income', 'legacy_payroll_costs', 'payroll', 'employee_advances', 'cash_movements', 'legacy_monthly_summaries'];
+    const entities = ['purchases', 'purchase_invoices', 'expenses', 'assets', 'establishment_costs', 'historical_imports', 'sales', 'other_income', 'legacy_payroll_costs', 'payroll', 'payroll_payments', 'employee_advances', 'cash_movements', 'legacy_monthly_summaries'];
     const allowed = entities.filter((entity) => permissionForEntity[entity]?.view ? hasPermission(session, permissionForEntity[entity].view) : true);
     const values = await Promise.all(allowed.map(async (entity) => {
       try { const snap = await get(ref(db, entity)); return snap.exists() ? Object.values(snap.val()) : []; } catch { return []; }
