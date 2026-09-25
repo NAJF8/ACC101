@@ -5,7 +5,7 @@
     "users": {
       "$uid": {
         ".read": "auth != null && (auth.uid == $uid || root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager')",
-        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin')"
+        ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || (auth.uid == $uid && !data.exists() && newData.child('email').val() == auth.token.email && newData.child('authorized_user_key').exists() && root.child('authorized_users').child(newData.child('authorized_user_key').val()).child('email').val() == auth.token.email && newData.child('role').val() == root.child('authorized_users').child(newData.child('authorized_user_key').val()).child('role').val()))"
       },
       ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager')"
     },

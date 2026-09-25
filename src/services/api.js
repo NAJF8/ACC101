@@ -2357,6 +2357,7 @@ async function resolveSession(user) {
   if (!existing) {
     if (!normalizeEmail(user.email)) throw Object.assign(new Error('تعذر التحقق من هوية الحساب.'), { code: 'AUTH_USER_INVALID' });
     let authorized = null;
+    let authorizedKey = normalizedEmailKey(user.email);
     console.info('AUTHORIZED_USER_LOOKUP_START');
     try {
       authorized = await api.get(`authorized_users/${normalizedEmailKey(user.email)}`);
@@ -2367,13 +2368,15 @@ async function resolveSession(user) {
     }
     if (!authorized) {
       const snap = await get(query(ref(db, 'authorized_users'), orderByChild('email'), equalTo(normalizeEmail(user.email))));
+      const entry = Object.entries(snap.exists() ? snap.val() : {}).find(([, record]) => normalizeEmail(record?.email) === normalizeEmail(user.email));
+      authorizedKey = entry?.[0] || authorizedKey;
       authorized = findAuthorizedRecord(snap.exists() ? snap.val() : null, user.email);
     }
     if (!authorized) { console.info('AUTHORIZED_USER_NOT_FOUND'); await signOut(auth); currentUserProfile = null; throw Object.assign(new Error('هذا الحساب غير مخول لاستخدام النظام.'), { code: 'AUTH_UNAUTHORIZED' }); }
     if (authorized.active === false || authorized.status === 'disabled') { await signOut(auth); currentUserProfile = null; throw new Error('هذا الحساب موقوف.'); }
     console.info('AUTHORIZED_USER_FOUND', { role: authorized.role || 'employee' });
     const permissions = permissionsFromFirebase(authorized.permissions || {});
-    currentUserProfile = { id: user.uid, name: authorized.name || user.displayName || '', email: user.email, role: authorized.role || 'employee', permissions, active: true };
+    currentUserProfile = { id: user.uid, name: authorized.name || user.displayName || '', email: user.email, authorized_user_key: authorizedKey, role: authorized.role || 'employee', permissions, active: true };
     await set(ref(db, `users/${user.uid}`), { ...currentUserProfile, permissions: permissionsToRules(permissions), updated_at: new Date().toISOString() });
   } else {
     currentUserProfile = existing;
