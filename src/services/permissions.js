@@ -72,6 +72,61 @@ export const permissionGroupLabels = {
   ,establishment: 'تكاليف التأسيس والافتتاح'
 };
 
+// Firebase Realtime Database does not allow . # $ [ ] / in child keys.
+// Keep the human-readable permission IDs in the UI, but use this one
+// canonical encoding at every Firebase write boundary.
+export const permissionKey = (permission) => String(permission ?? '').replace(/[.#$\/\[\]]/g, '_');
+
+const permissionKeyToId = () => Object.fromEntries(
+  Object.values(permissionGroups).flat().map((permission) => [permissionKey(permission), permission])
+);
+
+export const permissionsToFirebase = (permissions = {}) => {
+  const result = {};
+  const visit = (value, prefix = '') => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    Object.entries(value).forEach(([key, enabled]) => {
+      const id = prefix ? `${prefix}.${key}` : key;
+      if (enabled && typeof enabled === 'object' && !Array.isArray(enabled)) visit(enabled, id);
+      else if (enabled === true) result[permissionKey(id)] = true;
+    });
+  };
+  visit(permissions);
+  return result;
+};
+
+export const permissionsFromFirebase = (permissions = {}) => {
+  const safeToId = permissionKeyToId();
+  const result = {};
+  const visit = (value, prefix = '') => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    Object.entries(value).forEach(([key, enabled]) => {
+      const id = prefix ? `${prefix}.${key}` : key;
+      if (enabled && typeof enabled === 'object' && !Array.isArray(enabled)) return visit(enabled, id);
+      if (enabled !== true) return;
+      const canonical = safeToId[key] || safeToId[permissionKey(id)] || id;
+      if (allPermissionKeys.includes(canonical)) result[canonical] = true;
+    });
+  };
+  visit(permissions);
+  return result;
+};
+
+export const permissionsToRules = (permissions = {}) => {
+  const safe = permissionsToFirebase(permissions);
+  const nested = {};
+  Object.keys(safe).forEach((safeId) => {
+    const id = permissionKeyToId()[safeId] || safeId;
+    const dot = id.lastIndexOf('.');
+    if (dot < 1) return;
+    const group = id.slice(0, dot);
+    const action = id.slice(dot + 1);
+    nested[group] ||= {};
+    nested[group][action] = true;
+  });
+  return nested;
+};
+
 export const permissionLabels = {
   'dashboard.view': 'عرض لوحة التشغيل',
   'financial.view_revenue': 'عرض الإيرادات',
@@ -226,7 +281,8 @@ const permissionAliases = {
 export const hasPermission = (session, permission) => Boolean(
   session?.user?.role === 'super_admin' ||
   session?.permissions?.includes(permission) ||
-  (permissionAliases[permission] && session?.permissions?.includes(permissionAliases[permission]))
+  session?.permissions?.includes(permissionKey(permission)) ||
+  (permissionAliases[permission] && (session?.permissions?.includes(permissionAliases[permission]) || session?.permissions?.includes(permissionKey(permissionAliases[permission]))))
 );
 
 export const permissionForEntity = {

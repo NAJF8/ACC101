@@ -5,7 +5,10 @@ import {
   allPermissionKeys,
   cashierDefaultPermissionKeys,
   hasPermission,
-  permissionForEntity
+  permissionForEntity,
+  permissionsToFirebase,
+  permissionsFromFirebase,
+  permissionsToRules
 } from './permissions.js';
 import { amountOf, buildCashCarryForward, buildPeriodComparison, buildAccountReview, buildEstablishmentReport, buildPartnerCapitalSummary, countCashDenominations, buildMonthCloseReview, buildPayrollRows, calculatePayroll, calculatePayrollWithDebts, calculatePayable, cashSourceKey, currentMonth, filterRecordsByDateRange, getAvailableMonths, getCashMonthSummary, getImmediateCashPurchasePaid, getMonthlyCashMovement, getMonthlyExpenses, getMonthlyLegacyWithdrawals, getMonthlyOtherIncome, getMonthlyPayrollCost, getMonthlyPayrollPaid, getMonthlyPurchases, getMonthlyProfit, getMonthlySales, getMonthlySalesBreakdown, getRecordDate, getRecordMonth, getSalesTransactionNet, isCashPayment, localBusinessDate, money, nextMonth, normalizePaymentMethod, resolvePaymentMethod, previousMonth, recordsForMonth, resolvePurchaseRows, sum } from './financial.js';
 import { createDashboardRefreshScheduler } from './dashboard-realtime.js';
@@ -412,8 +415,11 @@ export const api = {
   authorizeUser: async (payload) => {
     const s = await api.session(); if (s?.user?.role !== 'super_admin') throw new Error('هذه العملية للسوبر أدمن فقط.');
     const email = normalizeEmail(payload.email); if (!email || !email.includes('@')) throw new Error('أدخل بريداً إلكترونياً صحيحاً.');
-    const data = withoutUndefined({ email, name: payload.name || '', phone: payload.phone || '', address: payload.address || '', job_title: payload.job_title || '', department: payload.department || '', hire_date: payload.hire_date || '', notes: payload.notes || '', role: payload.role || 'employee', base_salary: payload.base_salary != null && payload.base_salary !== '' ? Number(payload.base_salary) : undefined, permissions: payload.permissions || {}, active: payload.active !== false, created_at: new Date().toISOString(), created_by: s.user.id });
+    const data = withoutUndefined({ email, name: payload.name || '', phone: payload.phone || '', address: payload.address || '', job_title: payload.job_title || '', department: payload.department || '', hire_date: payload.hire_date || '', notes: payload.notes || '', role: payload.role || 'employee', base_salary: payload.base_salary != null && payload.base_salary !== '' ? Number(payload.base_salary) : undefined, permissions: permissionsToFirebase(payload.permissions || {}), active: payload.active !== false, created_at: new Date().toISOString(), created_by: s.user.id });
     const key = normalizedEmailKey(email); const previous = await api.get(`employees/${key}`).catch(() => null);
+    // authorized_users is the canonical flat safe-key representation and is
+    // never written with dotted IDs. Existing users/{uid} profiles are kept
+    // separate because that node is keyed by Firebase Auth UID.
     await update(ref(db), { [`authorized_users/${key}`]: data, [`employees/${key}`]: { id: key, employee_id: key, ...data } });
     await api.logAudit('USER_AUTHORIZE', 'authorized_users', key, data);
     if (previous?.base_salary !== data.base_salary) await api.logAudit('EMPLOYEE_BASE_SALARY_CHANGED', 'employees', key, { employee_id: key, before: previous?.base_salary ?? null, after: data.base_salary ?? null });
@@ -659,7 +665,7 @@ export const api = {
   listAuthorizedUsers: async () => {
     await requirePermission('users.view');
     const data = await api.get('authorized_users');
-    return Object.entries(data || {}).map(([id, value]) => ({ id, ...value }));
+    return Object.entries(data || {}).map(([id, value]) => ({ id, ...value, permissions: permissionsFromFirebase(value?.permissions || {}) }));
   },
   stockMovement: async ({ itemId, itemName, type, quantity, unit, reason, date, notes, operation_key }) => {
     const s = await api.session();
@@ -2301,8 +2307,9 @@ async function resolveSession(user) {
     }
     if (!authorized) { await signOut(auth); currentUserProfile = null; throw new Error('هذا الحساب غير مخول لاستخدام النظام.'); }
     if (authorized.active === false || authorized.status === 'disabled') { await signOut(auth); currentUserProfile = null; throw new Error('هذا الحساب موقوف.'); }
-    currentUserProfile = { id: user.uid, name: authorized.name || user.displayName || '', email: user.email, role: authorized.role || 'employee', permissions: authorized.permissions || {}, active: true };
-    await set(ref(db, `users/${user.uid}`), { ...currentUserProfile, updated_at: new Date().toISOString() });
+    const permissions = permissionsFromFirebase(authorized.permissions || {});
+    currentUserProfile = { id: user.uid, name: authorized.name || user.displayName || '', email: user.email, role: authorized.role || 'employee', permissions, active: true };
+    await set(ref(db, `users/${user.uid}`), { ...currentUserProfile, permissions: permissionsToRules(permissions), updated_at: new Date().toISOString() });
   } else {
     currentUserProfile = existing;
   }
@@ -2310,7 +2317,7 @@ async function resolveSession(user) {
   let perms = [];
   if (currentUserProfile.role === 'super_admin') perms = [...allPermissionKeys];
   else if (currentUserProfile.role === 'manager') perms = [...allPermissionKeys].filter(p => !['system.reset', 'users.delete', 'audit.delete', 'monthly_periods.reopen'].includes(p));
-  else if (currentUserProfile.permissions && Object.keys(currentUserProfile.permissions).length > 0) perms = Object.entries(currentUserProfile.permissions).flatMap(([key, value]) => typeof value === 'object' && value !== null ? Object.entries(value).filter(([, enabled]) => enabled === true).map(([child]) => `${key}.${child}`) : value === true ? [key] : []);
+  else if (currentUserProfile.permissions && Object.keys(currentUserProfile.permissions).length > 0) perms = Object.keys(permissionsFromFirebase(currentUserProfile.permissions));
   else if (currentUserProfile.role === 'supervisor') perms = ['purchases.view', 'purchases.create', 'expenses.view', 'expenses.create', 'sales.view', 'inventory.view', 'inventory.count', 'dashboard.view', 'financial.view_revenue', 'financial.view_payroll_cost', 'other_income.view'];
   else if (currentUserProfile.role === 'cashier') perms = [...cashierDefaultPermissionKeys];
   else if (currentUserProfile.role === 'employee') perms = ['purchases.create', 'expenses.create', 'sales.create'];
