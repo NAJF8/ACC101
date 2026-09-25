@@ -9,6 +9,7 @@
     "build": "vite build",
     "test:finance": "node scripts/finance-regression.mjs",
     "test:inventory": "node scripts/inventory-regression.mjs && node scripts/inventory-analytics-regression.mjs",
+    "test:migration": "node scripts/finished-product-regression.mjs",
     "test:emulator": "node scripts/final-emulator-regression.mjs && node scripts/sale-permission-regression.mjs",
     "test:debts": "node scripts/debt-regression.mjs",
     "test:expense-debt": "node scripts/expense-debt-emulator.mjs",
