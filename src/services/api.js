@@ -16,6 +16,7 @@ import { DEFAULT_LOCATION_ID, availableServings, barcodeMatch, expiryAlerts, loc
 import { buildSystemNotifications } from './notifications.js';
 import { debtAmount, debtPaid, normalizeDebt, resolveDebts } from './debts.js';
 import { buildAuditSnapshot } from './audit-center.js';
+import { buildEmployeeDependencySummary, EMPLOYEE_DEPENDENCY_ENTITIES, isEmployeeOperationallyActive } from './employee-lifecycle.js';
 export { permissionGroups } from './permissions.js';
 
 const withoutUndefined = (value) => {
@@ -1144,6 +1145,51 @@ export const api = {
     return () => { stopped = true; if (typeof unsubscribe === 'function') unsubscribe(); };
   },
   subscribeEmployees: (onData, onError) => api.subscribeCollection('employees', onData, onError),
+  employeeDependencies: async (employeeId) => {
+    const employee = await api.get(`employees/${employeeId}`);
+    if (!employee) throw new Error('الموظف غير موجود.');
+    const results = await Promise.all(EMPLOYEE_DEPENDENCY_ENTITIES.map(async (entity) => [entity, await api.list(entity)]));
+    return { employee, dependencies: buildEmployeeDependencySummary(employee, Object.fromEntries(results)) };
+  },
+  canPermanentlyDeleteEmployee: async (employeeId) => {
+    await requireSuperAdmin();
+    const result = await api.employeeDependencies(employeeId);
+    const total = Object.values(result.dependencies).reduce((sum, count) => sum + count, 0);
+    return { allowed: total === 0, total, dependencies: result.dependencies, employee: result.employee };
+  },
+  archiveEmployee: async (employeeId, reason = '') => {
+    const s = await requirePermission('employees.disable');
+    const employee = await api.get(`employees/${employeeId}`);
+    if (!employee) throw new Error('الموظف غير موجود.');
+    const now = new Date().toISOString();
+    const next = { active: false, enabled: false, archived: true, archived_at: now, archived_by: s.user.id, updated_at: now, updated_by: s.user.id };
+    await update(ref(db, `employees/${employeeId}`), next);
+    await api.logAudit('EMPLOYEE_ARCHIVED', 'employees', employeeId, { employee_id: employeeId, employee_name: employee.name || employee.name_ar || '', reason: String(reason || '').trim(), before: employee, after: next });
+    return { ...employee, ...next };
+  },
+  restoreEmployee: async (employeeId) => {
+    const s = await requirePermission('employees.disable');
+    const employee = await api.get(`employees/${employeeId}`);
+    if (!employee) throw new Error('الموظف غير موجود.');
+    const now = new Date().toISOString();
+    const next = { active: true, enabled: true, archived: false, restored_at: now, restored_by: s.user.id, updated_at: now, updated_by: s.user.id };
+    await update(ref(db, `employees/${employeeId}`), next);
+    await api.logAudit('EMPLOYEE_RESTORED', 'employees', employeeId, { employee_id: employeeId, employee_name: employee.name || employee.name_ar || '', before: employee, after: next });
+    return { ...employee, ...next };
+  },
+  permanentlyDeleteEmployee: async (employeeId, reason = '') => {
+    const s = await requireSuperAdmin();
+    const check = await api.canPermanentlyDeleteEmployee(employeeId);
+    if (isEmployeeOperationallyActive(check.employee)) throw new Error('الحذف النهائي متاح للموظفين المؤرشفين فقط.');
+    if (!check.allowed) {
+      const details = Object.entries(check.dependencies).map(([entity, count]) => `${entity}: ${count}`).join('، ');
+      throw new Error('لا يمكن حذف الموظف نهائيًا لوجود سجلات مالية مرتبطة به. يمكنك أرشفته بدلاً من ذلك.');
+    }
+    const employee = check.employee;
+    await api.logAudit('EMPLOYEE_DELETED_PERMANENTLY', 'employees', employeeId, { employee_id: employeeId, employee_name: employee.name || employee.name_ar || '', reason: String(reason || '').trim(), before: employee });
+    await set(ref(db, `employees/${employeeId}`), null);
+    return true;
+  },
   subscribeSystemNotifications: ({ month = currentMonth(), onData, onError } = {}) => {
     let stopped = false; const unsubscribers = [];
     const scheduler = createDashboardRefreshScheduler({
@@ -2001,7 +2047,7 @@ export const api = {
     const [employees, existing] = await Promise.all([api.list('employees').catch(() => []), api.list('payroll')]);
     const byEmployee = new Set(existing.filter((item) => getRecordMonth(item) === month).map((item) => item.employee_id || item.employee));
     const updates = {}; let created = 0;
-    employees.filter((employee) => employee.active !== false).forEach((employee) => {
+    employees.filter(isEmployeeOperationallyActive).forEach((employee) => {
       const employeeId = employee.id || employee.employee_id; if (!employeeId || byEmployee.has(employeeId)) return;
       const id = push(ref(db, 'payroll')).key; const base = Number(employee.base_salary ?? 0);
       updates[`payroll/${id}`] = { id, employee_id: employeeId, employee_name: employee.name || employee.name_ar || '', month, base_salary_snapshot: base, paid_amount: 0, remaining_amount: base, status: 'unpaid', created_at: new Date().toISOString(), created_by: s.user.id };

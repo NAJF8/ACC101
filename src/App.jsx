@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import {
   Archive,
   BarChart3,
+  CakeSlice,
   Bell,
   Boxes,
   Building2,
@@ -22,6 +23,7 @@ import {
   Package,
   Plus,
   Receipt,
+  RotateCcw,
   Search,
   Settings,
   ShieldCheck,
@@ -50,7 +52,7 @@ import {
 } from "./services/permissions.js";
 import "../styles.css";
 import "./reference.css";
-import { aggregateFinancialTimeline, buildDateRangeFinancialAggregation, buildMonthlyFinancialAggregation, buildPayrollRows, buildPeriodComparison, currentMonth, getRecordDate, getRecordMonth, monthLabel, nextMonth, normalizeDateRange, previousMonth, recordsForMonth } from "./services/financial.js";
+import { aggregateFinancialTimeline, buildDateRangeFinancialAggregation, buildMonthlyExpenseDetails, buildMonthlyFinancialAggregation, buildPayrollRows, buildPeriodComparison, currentMonth, getRecordDate, getRecordMonth, monthLabel, nextMonth, normalizeDateRange, previousMonth, recordsForMonth } from "./services/financial.js";
 import { buildInventorySalesAnalytics, filterExpiry, expiryStatus, inventoryBaseUnitCost, inventoryValue, isAmbiguousInventoryUnit, locationBalances, lowStockStatus, movementConsumptionBySource, normalizeBarcode, sortHistory, sortLowStock, packageEquivalent, packageSize } from "./services/inventory.js";
 import { cameraMessages, createBarcodeCameraController } from "./services/barcodeCamera.js";
 import { assetCategoryIdFromRecord } from "./services/audit-center.js";
@@ -162,7 +164,7 @@ const parseAssetWorkbook = (workbook, filename = "101caffee.xlsx") => {
 };
 const localQa = import.meta.env.DEV && typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname);
 const referencePrefix = { sales: "SALE", purchases: "PUR", expenses: "EXP", cash_movements: "CASH", debts: "DEBT", debt_payments: "DEBT-PAY", payroll_payments: "PAY", cashier_shifts: "SHIFT" };
-const auditActionLabel = { CREATE: "إنشاء", UPDATE: "تعديل", DELETE: "إلغاء / أرشفة", PAYMENT_METHOD_REVIEWED: "تصحيح طريقة الدفع", PURCHASE_INVOICE_CREATED: "إنشاء فاتورة شراء", SHIFT_OPENED: "فتح وردية", SHIFT_CLOSED: "إغلاق وردية" };
+const auditActionLabel = { CREATE: "إنشاء", UPDATE: "تعديل", DELETE: "إلغاء / أرشفة", EMPLOYEE_ARCHIVED: "أرشفة موظف", EMPLOYEE_RESTORED: "استرجاع موظف", EMPLOYEE_DELETED_PERMANENTLY: "حذف موظف نهائيًا", PAYMENT_METHOD_REVIEWED: "تصحيح طريقة الدفع", PURCHASE_INVOICE_CREATED: "إنشاء فاتورة شراء", SHIFT_OPENED: "فتح وردية", SHIFT_CLOSED: "إغلاق وردية" };
 const auditFieldLabel = { amount: "المبلغ", quantity: "الكمية", payment_method: "طريقة الدفع", status: "الحالة", reason: "السبب", date: "التاريخ", notes: "ملاحظات" };
 const auditValueText = (value) => {
   if (value == null || value === "") return "—";
@@ -1590,6 +1592,21 @@ const monthlyExpenseCategory = (row, path) => {
 };
 const monthlyExpenseAmount = (row) => Number(row.amount ?? row.total_after_discount ?? row.total ?? row.purchase_price ?? row.paid_amount ?? 0);
 const monthlyExpenseMonth = (row) => String(row.month || row.accounting_month || row.date || row.purchase_date || row.transaction_date || "").slice(0, 7);
+const MONTHLY_EXPENSE_CATEGORY_ICONS = {
+  "مواد القهوة": Coffee,
+  "مواد غذائية وحلويات": CakeSlice,
+  "كيك وحلويات": CakeSlice,
+  "مولدة وكهرباء": Zap,
+  "احتياجات المحل": ShoppingCart,
+  "رواتب وأجور": Users,
+  "نقل وتوصيل": Package,
+  "صيانة": Settings,
+  "إنترنت وشبكات": Layers,
+  "ضيافة": Utensils,
+  "أصول وتجهيزات": Building2,
+  "مصاريف أشخاص": UserRound,
+};
+const monthlyExpenseIcon = (name) => MONTHLY_EXPENSE_CATEGORY_ICONS[name] || Receipt;
 
 function MonthlyExpenses({ setToast }) {
   const [month, setMonth] = useState(currentMonth());
@@ -1598,10 +1615,12 @@ function MonthlyExpenses({ setToast }) {
   const [toDate, setToDate] = useState("");
   const [appliedRange, setAppliedRange] = useState(null);
   const [sources, setSources] = useState({});
+  const [catalog, setCatalog] = useState({ products: [], inventory_items: [] });
   const [query, setQuery] = useState("");
   const [payment, setPayment] = useState("all");
   const [kind, setKind] = useState("all");
   const [activeCategory, setActiveCategory] = useState("");
+  const [activeItem, setActiveItem] = useState(null);
   const expenseDetailsRef = useRef(null);
   const [detailsScrollRequest, setDetailsScrollRequest] = useState(0);
   const [busy, setBusy] = useState(true);
@@ -1610,7 +1629,9 @@ function MonthlyExpenses({ setToast }) {
     try {
       const paths = ["expenses", "purchases", "assets", "establishment_costs", "payroll", "payroll_payments", "cash_movements", "historical_imports"];
       const values = await Promise.all(paths.map((path) => api.list(path).catch(() => [])));
+      const [products, inventory_items] = await Promise.all([api.list("products").catch(() => []), api.list("inventory_items").catch(() => [])]);
       setSources(Object.fromEntries(paths.map((path, index) => [path, values[index]])));
+      setCatalog({ products, inventory_items });
     } catch (error) { setToast?.(userFacingError(error)); }
     finally { setBusy(false); }
   };
@@ -1629,7 +1650,8 @@ function MonthlyExpenses({ setToast }) {
     return (payment === "all" || method === payment) && (kind === "all" || (kind === "assets" && row.accounting_class === "fixed_asset") || (kind === "purchases" && ["purchase", "supplies"].includes(row.accounting_class)) || (kind === "expenses" && ["operating_expense", "expense"].includes(row.accounting_class))) && (!activeCategory || category === activeCategory) && (!query || text.includes(query.toLowerCase()));
   });
   const total = activeAggregation.cash_outflow, operating = activeAggregation.operating_expenses, assets = activeAggregation.assets, purchases = activeAggregation.purchases;
-  const categoryRows = (activeAggregation.categories || []).map((item) => ({ ...item, rows: monthRows.filter((row) => rowCategory(row) === item.name) }));
+  const detailAggregation = buildMonthlyExpenseDetails({ rows: monthRows, catalog, categoryOf: rowCategory });
+  const categoryRows = detailAggregation.categories.map((item) => ({ ...item, rows: monthRows.filter((row) => rowCategory(row) === item.name) }));
   const compareSources = sources;
   const compare = (otherMonth) => buildMonthlyFinancialAggregation({ sources: compareSources, month: otherMonth });
   const comparisonMonth = nextMonth(month);
@@ -1653,7 +1675,8 @@ function MonthlyExpenses({ setToast }) {
     <Panel title="مصاريف الشهر" action="سجل مالي واحد — طرق عرض متعددة">
       <div className="toolbar"><label><span>نوع التقرير</span><select aria-label="نوع التقرير" value={viewMode} onChange={(event) => { setViewMode(event.target.value); setActiveCategory(""); }}><option value="month">شهر كامل</option><option value="range">تقرير فترة</option></select></label>{viewMode === "month" ? <><label><span>السنة</span><input aria-label="السنة" type="number" min="2000" max="2100" value={month.slice(0, 4)} onChange={(event) => setMonth(`${event.target.value}-${month.slice(5)}`)} /></label><label><span>الشهر</span><select aria-label="الشهر" value={month.slice(5)} onChange={(event) => setMonth(`${month.slice(0, 4)}-${event.target.value}`)}>{Array.from({ length: 12 }, (_, index) => <option key={index + 1} value={String(index + 1).padStart(2, "0")}>{index + 1}</option>)}</select></label><button className="secondary" onClick={() => setMonth(previousMonth(month))}>الشهر السابق</button><button className="secondary" onClick={() => setMonth(nextMonth(month))}>الشهر التالي</button><button className="secondary" onClick={() => setMonth(currentMonth())}>هذا الشهر</button></> : <><label><span>من تاريخ</span><input aria-label="من تاريخ" type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} /></label><label><span>إلى تاريخ</span><input aria-label="إلى تاريخ" type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} /></label><button className="primary" onClick={() => { try { setAppliedRange(normalizeDateRange({ mode: "custom", fromDate, toDate })); setActiveCategory(""); } catch (error) { setToast?.(error.message); } }}>عرض التقرير</button><button className="secondary" onClick={() => { const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Baghdad" }); setFromDate(today); setToDate(today); setAppliedRange({ fromDate: today, toDate: today }); }}>اليوم</button><button className="secondary" onClick={() => { const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Baghdad" }); const start = new Date(`${today}T12:00:00`); start.setDate(start.getDate() - start.getDay()); const first = start.toLocaleDateString("en-CA"); setFromDate(first); setToDate(today); setAppliedRange({ fromDate: first, toDate: today }); }}>هذا الأسبوع</button><button className="secondary" onClick={() => { const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Baghdad" }); const first = `${today.slice(0, 7)}-01`; setFromDate(first); setToDate(today); setAppliedRange({ fromDate: first, toDate: today }); }}>هذا الشهر</button><button className="secondary" onClick={() => { const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Baghdad" }); const first = `${today.slice(0, 4)}-01-01`; setFromDate(first); setToDate(today); setAppliedRange({ fromDate: first, toDate: today }); }}>هذه السنة</button><button className="secondary" disabled={!openingDate} onClick={() => { setFromDate(openingDate); setToDate(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Baghdad" })); setAppliedRange({ fromDate: openingDate, toDate: new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Baghdad" }) }); }}>من افتتاح الكوفي إلى الآن</button></> }<div className="table-search"><Search size={17} /><input placeholder="بحث بالوصف أو المورد..." value={query} onChange={(event) => setQuery(event.target.value)} /></div><select aria-label="طريقة الدفع" value={payment} onChange={(event) => setPayment(event.target.value)}><option value="all">كل طرق الدفع</option><option value="cash">نقدي</option><option value="electronic">إلكتروني</option><option value="transfer">تحويل</option></select><select aria-label="نوع السجل" value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">كل السجلات</option><option value="expenses">مصروفات</option><option value="purchases">مشتريات</option><option value="assets">أصول</option></select><button className="secondary" onClick={load} disabled={busy}>تحديث</button></div>
       <div className="report-summary-grid"><div className="report-summary-card"><span>إجمالي الخارج</span><strong>{money(total)}</strong></div><div className="report-summary-card"><span>المصروفات التشغيلية</span><strong>{money(operating)}</strong></div><div className="report-summary-card"><span>المشتريات والمواد</span><strong>{money(purchases)}</strong></div><div className="report-summary-card"><span>الرواتب</span><strong>{money(activeAggregation.payroll)}</strong></div><div className="report-summary-card"><span>الأصول</span><strong>{money(assets)}</strong></div></div>
-        {busy ? <LoadingBlock /> : !monthRows.length ? <Empty text={viewMode === "month" ? "لا توجد حركات لهذا الشهر" : "لا توجد حركات ضمن الفترة"} /> : <><div className="report-summary-grid category-card-grid">{categoryRows.map((item) => <button type="button" className={`report-summary-card category-card ${activeCategory === item.name ? "active" : ""}`} key={item.name} onClick={() => selectCategory(item.name)}><span>{item.name}</span><strong>{money(item.total)}</strong><small>{item.count.toLocaleString("ar-IQ")} حركة</small></button>)}</div>{viewMode === "month" && <Panel title={`مقارنة ${monthLabel(month)} مع ${monthLabel(comparisonMonth)}`} action="شهران فقط"><div className="comparison-grid">{[["إجمالي الخارج", total, comparison.cash_outflow], ["المصاريف", operating, comparison.operating_expenses], ["المشتريات", purchases, comparison.purchases], ["الرواتب", aggregation.payroll, comparison.payroll], ["الأصول", assets, comparison.assets]].map(([label, current, other]) => <div className="comparison-card" key={label}><span>{label}</span><strong>{money(current)}</strong><small>الفرق: {money(Math.abs(current - other))}</small></div>)}</div></Panel>}<section ref={expenseDetailsRef} className="monthly-expense-details" aria-labelledby="monthly-expense-details-title"><div className="monthly-expense-details-head"><div><h2 id="monthly-expense-details-title">{activeCategory ? `تفاصيل الحركات — ${activeCategory}` : "تفاصيل جميع الحركات"}</h2><span className="record-count">عدد الحركات المعروضة: {filtered.length.toLocaleString("ar-IQ")}</span></div>{activeCategory && <button type="button" className="secondary" onClick={showAllCategories}>إظهار الكل</button>}</div>{filtered.length ? <DataTable rows={filtered.map((row) => ({ ...row, category_display: rowCategory(row), source_display: row.__source }))} columns={[["date", "التاريخ", (value, row) => value || row.purchase_date || row.transaction_date || "—"], ["description", "الوصف", (value, row) => value || row.name || row.item_name || row.reason || "—"], ["beneficiary", "الشخص / المورد", (value, row) => value || row.supplier_name || row.person_name || row.employee_name || "—"], ["amount_display", "المبلغ", money], ["category_display", "الفئة"], ["subcategory_name", "القسم الفرعي", (value) => value || "—"], ["payment_method", "طريقة الدفع", (value) => ({ cash: "نقدي", electronic: "إلكتروني", transfer: "تحويل", historical: "تاريخي" }[value] || value || "—")], ["accounting_class", "التصنيف المحاسبي"], ["source_display", "المصدر"], ["id", "رقم السجل"]]} /> : <Empty text={activeCategory ? "لا توجد حركات ضمن هذه الفئة للفترة المحددة" : "لا توجد حركات مطابقة للبحث أو الفلاتر"} />}</section></>}
+        {busy ? <LoadingBlock /> : !monthRows.length ? <Empty text={viewMode === "month" ? "لا توجد حركات لهذا الشهر" : "لا توجد حركات ضمن الفترة"} /> : <><div className="report-summary-grid category-card-grid">{categoryRows.map((item) => { const Icon = monthlyExpenseIcon(item.name); return <button type="button" className={`report-summary-card category-card ${activeCategory === item.name ? "active" : ""}`} key={item.name} onClick={() => selectCategory(item.name)}><span className="category-card-icon"><Icon size={22} aria-hidden="true" /></span><span>{item.name}</span><strong>{money(item.total)}</strong><small>{item.items.length.toLocaleString("ar-IQ")} عناصر · {item.movementCount.toLocaleString("ar-IQ")} حركة</small></button>; })}</div>{viewMode === "month" && <Panel title={`مقارنة ${monthLabel(month)} مع ${monthLabel(comparisonMonth)}`} action="شهران فقط"><div className="comparison-grid">{[["إجمالي الخارج", total, comparison.cash_outflow], ["المصاريف", operating, comparison.operating_expenses], ["المشتريات", purchases, comparison.purchases], ["الرواتب", aggregation.payroll, comparison.payroll], ["الأصول", assets, comparison.assets]].map(([label, current, other]) => <div className="comparison-card" key={label}><span>{label}</span><strong>{money(current)}</strong><small>الفرق: {money(Math.abs(current - other))}</small></div>)}</div></Panel>}<section ref={expenseDetailsRef} className="monthly-expense-details" aria-labelledby="monthly-expense-details-title"><div className="monthly-expense-details-head"><div><h2 id="monthly-expense-details-title">{activeCategory ? `تفاصيل ${activeCategory} — ${monthLabel(viewMode === "month" ? month : "all")}` : "تفاصيل جميع الحركات"}</h2><span className="record-count">عدد الحركات المعروضة: {filtered.length.toLocaleString("ar-IQ")}</span></div>{activeCategory && <button type="button" className="secondary" onClick={showAllCategories}>إظهار الكل</button>}</div>{activeCategory ? <div className="expense-item-grid">{(detailAggregation.categories.find((item) => item.name === activeCategory)?.items || []).map((item) => <button type="button" className="expense-item-card" key={`${item.name}-${item.unit}`} onClick={() => setActiveItem(item)}><strong>{item.name}</strong>{item.hasQuantity && <span>{item.quantity.toLocaleString("ar-IQ")} {item.unit || "وحدة"}</span>}<span>{item.movementCount.toLocaleString("ar-IQ")} حركة</span><b>{money(item.amount)}</b></button>)}</div> : filtered.length ? <DataTable rows={filtered.map((row) => ({ ...row, category_display: rowCategory(row), source_display: row.__source }))} columns={[["date", "التاريخ", (value, row) => value || row.purchase_date || row.transaction_date || "—"], ["description", "الوصف", (value, row) => value || row.name || row.item_name || row.reason || "—"], ["beneficiary", "الشخص / المورد", (value, row) => value || row.supplier_name || row.person_name || row.employee_name || "—"], ["amount_display", "المبلغ", money], ["category_display", "الفئة"], ["subcategory_name", "القسم الفرعي", (value) => value || "—"], ["payment_method", "طريقة الدفع", (value) => ({ cash: "نقدي", electronic: "إلكتروني", transfer: "تحويل", historical: "تاريخي" }[value] || value || "—")], ["accounting_class", "التصنيف المحاسبي"], ["source_display", "المصدر"], ["id", "رقم السجل"]]} /> : <Empty text={"لا توجد حركات مطابقة للبحث أو الفلاتر"} />}</section></>}
+      {activeItem && <Modal title={`${activeItem.name} — الحركات الفعلية`} onClose={() => setActiveItem(null)}><div className="report-summary-grid"><div className="report-summary-card"><span>إجمالي المبلغ</span><strong>{money(activeItem.amount)}</strong></div><div className="report-summary-card"><span>إجمالي الكمية</span><strong>{activeItem.hasQuantity ? `${activeItem.quantity.toLocaleString("ar-IQ")} ${activeItem.unit || "وحدة"}` : "غير مسجلة"}</strong></div><div className="report-summary-card"><span>عدد الحركات</span><strong>{activeItem.movementCount.toLocaleString("ar-IQ")}</strong></div></div><DataTable rows={activeItem.rows} columns={[["date", "التاريخ", (value, row) => value || row.purchase_date || row.transaction_date || "—"], ["quantity", "الكمية", (value, row) => value == null || value === "" ? "—" : `${Number(value).toLocaleString("ar-IQ")} ${row.unit || "وحدة"}`], ["amount_display", "المبلغ", (value, row) => money(value ?? row.amount ?? row.total_after_discount ?? row.total)], ["description", "الوصف", (value, row) => value || row.name || row.item_name || row.reason || "—"], ["source", "المصدر", (value, row) => value || row.__source || row.source_type || "—"]]} /></Modal>}
     </Panel>
   </div>;
 }
@@ -1968,7 +1991,7 @@ function LegacyLinkHost({ setToast }) {
   useEffect(() => { const created = async (event) => { if (!row || !event.detail?.id) return; try { await api.linkLegacyEmployee({ entity: "payroll", id: row.id, employeeId: event.detail.id }); setToast?.("تم إنشاء ملف الموظف وربطه بنجاح"); window.dispatchEvent(new CustomEvent("legacy:linked")); setRow(null); } catch { setToast?.("تعذر ربط السجل بملف الموظف"); } }; window.addEventListener("employee:created", created); return () => window.removeEventListener("employee:created", created); }, [row]);
   if (!row) return null;
   const normalized = (value) => String(value || "").trim().toLowerCase().replace(/[ًٌٍَُِّْـ]/g, "").replace(/[إأآ]/g, "ا").replace(/\s+/g, " ");
-  const results = employees.filter((employee) => `${employee.name || ""} ${employee.phone || ""}`.toLowerCase().includes(query.toLowerCase()));
+  const results = employees.filter((employee) => employee.active !== false && employee.archived !== true && employee.enabled !== false && `${employee.name || ""} ${employee.phone || ""}`.toLowerCase().includes(query.toLowerCase()));
   const close = () => setRow(null);
   const link = async (employee) => { try { await api.linkLegacyEmployee({ entity: "payroll", id: row.id, employeeId: employee.id }); setToast?.("تم ربط السجل بملف الموظف بنجاح"); window.dispatchEvent(new CustomEvent("legacy:linked")); close(); } catch { setToast?.("تعذر ربط السجل بملف الموظف"); } };
   const create = async (form) => { const matches = employees.filter((employee) => normalized(employee.name) === normalized(form.name)); if (matches.length && !similar.length) { setSimilar(matches); return; } try { const employee = await api.create("employees", { ...form, status: form.status || "active" }); await link(employee); } catch { setToast?.("تعذر إنشاء ملف الموظف"); } };
@@ -2599,8 +2622,8 @@ function Categories({ setToast }) {
     />
   );
 }
-function Employees({ can = () => false, setToast }) {
-  const [rows, setRows] = useState([]), [query, setQuery] = useState(""), [show, setShow] = useState(false), [editing, setEditing] = useState(null), [profile, setProfile] = useState(null);
+function Employees({ can = () => false, setToast, isSuperAdmin = false }) {
+  const [rows, setRows] = useState([]), [query, setQuery] = useState(""), [show, setShow] = useState(false), [editing, setEditing] = useState(null), [profile, setProfile] = useState(null), [filter, setFilter] = useState("active"), [busy, setBusy] = useState(false);
   const load = () => api.list("employees").then(setRows).catch(() => setRows([])); useEffect(() => { load(); }, []);
   useEffect(() => {
     const handleNewAction = (event) => {
@@ -2611,10 +2634,36 @@ function Employees({ can = () => false, setToast }) {
     return () => document.removeEventListener("app:new-action", handleNewAction);
   }, [can]);
   useEffect(() => api.subscribeEmployees(setRows, () => setRows([])), []);
-  const filtered = rows.filter((row) => `${row.name || ""} ${row.phone || ""}`.toLowerCase().includes(query.toLowerCase()));
+  const filtered = rows.filter((row) => {
+    const archived = row.archived === true || row.active === false || row.enabled === false;
+    return (filter === "all" || (filter === "archived" ? archived : !archived)) && `${row.name || ""} ${row.phone || ""}`.toLowerCase().includes(query.toLowerCase());
+  });
   const fields = [["name", "الاسم"], ["phone", "رقم الهاتف"], ["address", "العنوان"], ["job_title", "المسمى الوظيفي"], ["department", "القسم"], ["base_salary", "الراتب الأساسي"], ["hire_date", "تاريخ المباشرة", "date"], ["status", "الحالة", "select", [["active", "فعال"], ["inactive", "غير فعال"]]], ["notes", "الملاحظات"]];
   const liveProfile = profile ? rows.find((row) => row.id === profile.id) || profile : null;
-  return <div className="screen-stack"><Panel title="ملفات الموظفين" action="البيانات الشخصية والمالية المرتبطة بملف الموظف"><div className="toolbar"><div className="table-search"><Search size={17} /><input placeholder="بحث بالاسم أو رقم الهاتف..." value={query} onChange={(e) => setQuery(e.target.value)} /></div>{can("employees.create") && <button className="primary" onClick={() => { setEditing(null); setShow(true); }}><Plus size={17} /> إضافة موظف</button>}</div><DataTable rows={filtered} columns={[["name", "الاسم"], ["phone", "الهاتف"], ["job_title", "المسمى الوظيفي"], ["department", "القسم"], ["base_salary", "الراتب الأساسي", money], ["status", "الحالة", (v) => v === "inactive" ? "غير فعال" : "فعال"]]} rowActions={(row) => <button className="table-action" onClick={() => setProfile(row)}>عرض الملف</button>} onEdit={can("employees.edit") ? (row) => { setEditing(row); setShow(true); } : undefined} /></Panel>{show && <Modal title={editing ? "تعديل ملف موظف" : "إضافة موظف"} onClose={() => setShow(false)}><SmartForm entity="employees" initial={editing || { status: "active" }} onDone={() => { setShow(false); load(); setToast?.(editing ? "تم تحديث الموظف بنجاح" : "تم حفظ الموظف بنجاح"); }} fields={fields} /></Modal>}{liveProfile && <EmployeeProfile employee={liveProfile} can={can} onClose={() => setProfile(null)} />}</div>;
+  const run = async (action, row) => {
+    const archived = row.archived === true || row.active === false || row.enabled === false;
+    const label = action === "archive" ? "أرشفة" : action === "restore" ? "استرجاع" : "حذف نهائي";
+    const warning = action === "archive" ? `سيتم إخفاء ${row.name || "الموظف"} من القوائم التشغيلية مع الاحتفاظ بكل سجلاته التاريخية.` : action === "delete" ? `سيتم حذف ${row.name || "الموظف"} نهائيًا إذا لم توجد أي سجلات مالية مرتبطة. لا يمكن التراجع عن ذلك.` : `سيتم إعادة ${row.name || "الموظف"} إلى القوائم التشغيلية.`;
+    if (action === "delete") {
+      if (!isSuperAdmin) { setToast?.("هذه العملية للسوبر أدمن فقط."); return false; }
+      try {
+        await api.canPermanentlyDeleteEmployee(row.id);
+      } catch (error) {
+        setToast?.(error.message || "لا يمكن حذف الموظف نهائيًا.");
+        return false;
+      }
+    }
+    if (!window.confirm(`${label} الموظف؟\n\n${warning}\n\nاضغط موافق للمتابعة.`)) return;
+    setBusy(true);
+    try {
+      if (action === "archive") await api.archiveEmployee(row.id, "إجراء من صفحة الموظفين");
+      if (action === "restore") await api.restoreEmployee(row.id);
+      if (action === "delete") await api.permanentlyDeleteEmployee(row.id, "حذف نهائي بعد فحص الاعتماديات");
+      await load(); setToast?.(action === "archive" ? "تمت أرشفة الموظف مع حفظ تاريخه" : action === "restore" ? "تم استرجاع الموظف" : "تم حذف الموظف نهائيًا");
+      return true;
+    } catch (error) { setToast?.(error.message || `تعذر تنفيذ ${label}`); return false; } finally { setBusy(false); }
+  };
+  return <div className="screen-stack"><Panel title="ملفات الموظفين" action="الأرشفة لا تحذف الرواتب أو السجلات المالية التاريخية"><div className="toolbar"><div className="table-search"><Search size={17} /><input placeholder="بحث بالاسم أو رقم الهاتف..." value={query} onChange={(e) => setQuery(e.target.value)} /></div><div className="filter-pills"><button className={filter === "active" ? "active" : ""} onClick={() => setFilter("active")}>النشطون</button><button className={filter === "archived" ? "active" : ""} onClick={() => setFilter("archived")}>المؤرشفون</button><button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>الكل</button></div>{can("employees.create") && <button className="primary" onClick={() => { setEditing(null); setShow(true); }}><Plus size={17} /> إضافة موظف</button>}</div><DataTable rows={filtered} columns={[["name", "الاسم"], ["phone", "الهاتف"], ["job_title", "المسمى الوظيفي"], ["department", "القسم"], ["base_salary", "الراتب الأساسي", money], ["status", "الحالة", (v, row) => row.archived === true || row.active === false || row.enabled === false ? <span className="status-badge status-inactive">مؤرشف</span> : v === "inactive" ? "غير فعال" : "فعال"]]} rowActions={(row) => { const archived = row.archived === true || row.active === false || row.enabled === false; return <><button className="table-action" onClick={() => setProfile(row)}>عرض الملف</button>{can("employees.disable") && !archived && <button className="table-action" disabled={busy} onClick={() => run("archive", row)} title="أرشفة الموظف"><Archive size={15} /> أرشفة</button>}{can("employees.disable") && archived && <button className="table-action" disabled={busy} onClick={() => run("restore", row)} title="استرجاع الموظف"><RotateCcw size={15} /> استرجاع</button>}{isSuperAdmin && archived && <button className="table-action danger" disabled={busy} onClick={() => run("delete", row)} title="حذف نهائي"><Trash2 size={15} /> حذف نهائي</button>}</>; }} onEdit={can("employees.edit") ? (row) => { setEditing(row); setShow(true); } : undefined} /></Panel>{show && <Modal title={editing ? "تعديل ملف موظف" : "إضافة موظف"} onClose={() => setShow(false)}><SmartForm entity="employees" initial={editing || { status: "active", active: true, enabled: true, archived: false }} onDone={() => { setShow(false); load(); setToast?.(editing ? "تم تحديث الموظف بنجاح" : "تم حفظ الموظف بنجاح"); }} fields={fields} />{editing && <div className="employee-lifecycle-actions" aria-label="إجراءات دورة حياة الموظف"><div className="employee-lifecycle-divider"><span>إجراءات حالة الموظف</span></div>{can("employees.disable") && <button type="button" className="secondary" disabled={busy} onClick={async () => { const archived = editing.archived === true || editing.active === false || editing.enabled === false; const ok = await run(archived ? "restore" : "archive", editing); if (ok) setShow(false); }}>{editing.archived === true || editing.active === false || editing.enabled === false ? <><RotateCcw size={16} /> استعادة الموظف</> : <><Archive size={16} /> أرشفة الموظف</>}</button>}{isSuperAdmin && <button type="button" className="danger-action" disabled={busy} onClick={async () => { const ok = await run("delete", editing); if (ok) setShow(false); }}><Trash2 size={16} /> حذف نهائي</button>}</div>}</Modal>}{liveProfile && <EmployeeProfile employee={liveProfile} can={can} onClose={() => setProfile(null)} />}</div>;
 }
 function EmployeeProfile({ employee, can = () => false, onClose }) {
   const [tab, setTab] = useState("personal"), [data, setData] = useState({ payroll: [], adjustments: [], debts: [], payments: [] });

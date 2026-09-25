@@ -473,6 +473,36 @@ tr:hover td { background: #f9fbfa; }
 .smart-form input[readonly] { background: #f5f8f5; color: var(--text-muted); }
 .wide { grid-column: 1 / -1; }
 .form-actions { display: flex; gap: 10px; }
+.employee-lifecycle-actions {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #e5ece7;
+}
+.employee-lifecycle-divider {
+  color: #68786e;
+  font-size: 12px;
+  font-weight: 600;
+}
+.employee-lifecycle-actions button {
+  width: 100%;
+  justify-content: center;
+}
+.danger-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #e5a3a7;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #a83235;
+  background: #fff2f2;
+  font: inherit;
+  cursor: pointer;
+}
+.danger-action:hover:not(:disabled) { background: #ffe3e3; }
+.danger-action:disabled { opacity: .6; cursor: not-allowed; }
 
 /* ===== NOTICE / ALERT ===== */
 .notice {
@@ -739,6 +769,14 @@ tr:hover td { background: #f9fbfa; }
 .category-card span { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
 .category-card strong { display: block; font-size: 15px; color: var(--text); font-weight: 700; }
 .category-card small { display: block; font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+.category-card-icon { width: 38px; height: 38px; display: grid !important; place-items: center; margin-bottom: 8px; border-radius: 11px; background: var(--green-100); color: var(--green-700) !important; }
+.category-card-icon svg { display: block; }
+.expense-item-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.expense-item-card { display: grid; gap: 5px; padding: 13px; border: 1px solid var(--border); border-radius: 10px; background: var(--white); text-align: right; cursor: pointer; transition: .15s; }
+.expense-item-card:hover { border-color: #aed2bd; box-shadow: var(--shadow); transform: translateY(-1px); }
+.expense-item-card strong { color: var(--green-700); font-size: 14px; }
+.expense-item-card span { color: var(--text-muted); font-size: 11px; }
+.expense-item-card b { color: var(--text); font-size: 14px; margin-top: 2px; }
 .category-art { width: 40px; height: 40px; border-radius: 10px; background: var(--green-100); color: var(--green-700); display: grid; place-items: center; margin-bottom: 8px; }
 .category-action { color: var(--green-700); font-size: 12px; }
 .add-category-card { border-style: dashed; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-muted); gap: 6px; min-height: 90px; }
@@ -1190,6 +1228,7 @@ tr:hover td { background: #f9fbfa; }
   .toolbar { flex-wrap: wrap; }
   .table-search { flex-basis: 100%; }
   .report-grid, .report-summary-grid { grid-template-columns: repeat(2, 1fr); }
+  .expense-item-grid { grid-template-columns: 1fr; }
   .report-card, .report-summary-card { padding: 12px; }
   .report-summary-card strong { font-size: 14px; }
   .smart-form { grid-template-columns: 1fr; }

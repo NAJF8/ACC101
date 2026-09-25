@@ -1,4 +1,5 @@
 const pad = (value) => String(value).padStart(2, '0');
+const isEmployeeOperationallyActive = (employee = {}) => employee.active !== false && employee.archived !== true && employee.enabled !== false;
 
 const BUSINESS_TIME_ZONE = 'Asia/Baghdad';
 
@@ -376,6 +377,82 @@ export const financialPaidAmount = (row = {}, source = '') => {
   return Math.max(0, Number(row.paid_amount ?? row.amount ?? row.total ?? 0));
 };
 
+const FINISHED_PRODUCT_NAMES = Object.freeze({
+  'excel-prod-42': 'براونيز',
+  'excel-prod-49': 'مافن',
+  'excel-prod-53': 'ساندويش',
+});
+
+const catalogName = (catalog = {}, collection, id) => {
+  if (!id) return '';
+  const row = (catalog[collection] || []).find((item) => String(item.id || item.key) === String(id));
+  return row?.name_ar || row?.name || row?.nameAr || row?.name_en || row?.nameEn || '';
+};
+
+export const resolveExpenseItemName = (row = {}, catalog = {}) => {
+  const productId = row.product_id || row.productId || row.finished_product_id;
+  const inventoryId = row.inventory_item_id || row.inventoryItemId || row.material_id;
+  return FINISHED_PRODUCT_NAMES[String(productId)]
+    || catalogName(catalog, 'products', productId)
+    || row.product_name || row.productName || row.inventory_item_name || row.material_name
+    || catalogName(catalog, 'inventory_items', inventoryId)
+    || row.item_name || row.expense_item || row.item || row.name || row.description || row.details
+    || row.reason || 'عنصر غير محدد';
+};
+
+const expenseQuantity = (row = {}) => {
+  const value = row.quantity ?? row.qty ?? row.quantity_purchased ?? row.purchased_quantity;
+  if (value === undefined || value === null || value === '' || !Number.isFinite(Number(value))) return null;
+  return Number(value);
+};
+
+const expenseUnit = (row = {}) => row.unit || row.unit_name || row.purchase_unit || row.base_unit || '';
+
+// Reporting-only second-level aggregation. It deliberately consumes the rows
+// already selected by buildMonthlyFinancialAggregation and never writes stock.
+export const buildMonthlyExpenseDetails = ({ rows = [], catalog = {}, categoryOf = (row) => row.category_name || row.category || 'أخرى' } = {}) => {
+  const groups = new Map();
+  rows.forEach((row) => {
+    const category = categoryOf(row) || 'أخرى';
+    const lines = Array.isArray(row.items) && row.items.length ? row.items : [row];
+    const parentAmount = Number(row.amount_display ?? row.amount ?? row.total_after_discount ?? row.total_price ?? row.total ?? 0) || 0;
+    const lineQuantities = lines.map(expenseQuantity);
+    const totalLineQuantity = lineQuantities.reduce((sum, value) => sum + (value === null ? 0 : Math.max(0, value)), 0);
+    lines.forEach((line, index) => {
+      const detail = line === row ? row : { ...row, ...line, date: line.date || row.date, id: `${row.id || row.key || 'row'}:${index}` };
+      const name = resolveExpenseItemName(detail, catalog);
+      const unit = expenseUnit(detail);
+      const key = `${category}\u0000${name}\u0000${unit}`;
+      const explicitLineAmount = line.line_total ?? line.amount ?? line.total_after_discount ?? line.total_price ?? line.total;
+      const amount = explicitLineAmount !== undefined && explicitLineAmount !== null && explicitLineAmount !== ''
+        ? Number(explicitLineAmount) || 0
+        : lines.length === 1
+          ? parentAmount
+          : totalLineQuantity > 0 && lineQuantities[index] !== null
+            ? parentAmount * Math.max(0, lineQuantities[index]) / totalLineQuantity
+            : parentAmount / lines.length;
+      const bucket = groups.get(key) || { name, category, unit, amount: 0, quantity: 0, hasQuantity: false, movementCount: 0, rows: [] };
+      bucket.amount += amount;
+      const quantity = expenseQuantity(detail);
+      if (quantity !== null) { bucket.quantity += quantity; bucket.hasQuantity = true; }
+      bucket.movementCount += 1;
+      bucket.rows.push(detail);
+      groups.set(key, bucket);
+    });
+  });
+  const items = [...groups.values()].map((item) => ({ ...item, rows: item.rows.sort((a, b) => String(getRecordDate(b) || '').localeCompare(String(getRecordDate(a) || ''))) }));
+  const categories = [...items.reduce((map, item) => {
+    const bucket = map.get(item.category) || { name: item.category, total: 0, movementCount: 0, items: [] };
+    bucket.total += item.amount;
+    bucket.movementCount += item.movementCount;
+    bucket.items.push(item);
+    map.set(item.category, bucket);
+    return map;
+  }, new Map()).values()];
+  categories.forEach((category) => category.items.sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name, 'ar')));
+  return { items, categories };
+};
+
 export const buildMonthlyFinancialAggregation = ({ sources = {}, month = 'all' } = {}) => {
   const priority = ['expenses', 'purchases', 'assets', 'establishment_costs', 'payroll_payments', 'payroll', 'cash_movements', 'historical_imports'];
   const candidates = priority.flatMap((source) => (sources[source] || []).map((row) => ({ ...row, __source: source })));
@@ -450,10 +527,19 @@ export const eligibleEmployeeDebts = ({ debts = [], employeeId, month }) => debt
 ));
 
 export const buildPayrollRows = ({ payroll = [], employees = [], month }) => {
-  const existing = recordsForMonth(payroll, month);
+  const employeeById = new Map(employees.flatMap((employee) => {
+    const id = employee.id || employee.employee_id;
+    return id ? [[String(id), employee]] : [];
+  }));
+  const employeeByName = new Map(employees.map((employee) => [String(employee.name || employee.name_ar || '').trim().toLocaleLowerCase(), employee]));
+  const existing = recordsForMonth(payroll, month).filter((row) => {
+    const employee = employeeById.get(String(row.employee_id || row.employee || ''))
+      || employeeByName.get(String(row.employee_name || '').trim().toLocaleLowerCase());
+    return !employee || isEmployeeOperationallyActive(employee);
+  });
   if (month === 'all') return existing;
   const existingEmployees = new Set(existing.map((row) => row.employee_id || row.employee));
-  const virtual = employees.filter((employee) => employee.active !== false && (employee.id || employee.employee_id) && !existingEmployees.has(employee.id || employee.employee_id)).map((employee) => ({
+  const virtual = employees.filter((employee) => isEmployeeOperationallyActive(employee) && (employee.id || employee.employee_id) && !existingEmployees.has(employee.id || employee.employee_id)).map((employee) => ({
     id: `virtual-${employee.id || employee.employee_id}-${month}`,
     employee_id: employee.id || employee.employee_id,
     employee_name: employee.name || employee.name_ar || '',
