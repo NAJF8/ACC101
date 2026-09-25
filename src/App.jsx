@@ -244,7 +244,7 @@ const pageCreatePermissions = {
 };
 const pageIsAllowed = (session, pageId) => pageId === "dashboard" || hasPermission(session, pagePermissions[pageId]);
 export function App() {
-  console.info("BUILD_MARKER_20260913_2110");
+  console.info("BUILD_MARKER_20260926_AUTH_FIX");
   const [session, setSession] = useState(null),
     [active, setActive] = useState("dashboard"),
     [loading, setLoading] = useState(true),

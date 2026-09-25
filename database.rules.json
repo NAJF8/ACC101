@@ -10,7 +10,8 @@
       ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager')"
     },
     "authorized_users": {
-      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || root.child('users').child(auth.uid).child('permissions').child('users').child('view').val() == true)",
+      ".indexOn": ["email"],
+      ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || root.child('users').child(auth.uid).child('permissions').child('users').child('view').val() == true || (query.orderByChild == 'email' && query.equalTo == auth.token.email))",
       "$email": {
         ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('role').val() == 'manager' || root.child('users').child(auth.uid).child('permissions').child('users').child('view').val() == true || auth.token.email == data.child('email').val())",
         ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() == 'super_admin' || root.child('users').child(auth.uid).child('permissions').child('users').child('create').val() == true || root.child('users').child(auth.uid).child('permissions').child('users').child('edit').val() == true)"

@@ -1,4 +1,4 @@
-import { auth, db, ref, set, get, push, update, remove, onValue, serverTimestamp, runTransaction, signOut, GoogleAuthProvider, signInWithPopup, signInWithEmailAndPassword, onAuthStateChanged } from './firebase.js';
+import { auth, db, ref, set, get, push, update, remove, onValue, serverTimestamp, runTransaction, signOut, GoogleAuthProvider, signInWithPopup, signInWithEmailAndPassword, onAuthStateChanged, setPersistence, browserLocalPersistence, query, orderByChild, equalTo } from './firebase.js';
 import * as XLSX from 'xlsx';
 import {
   permissionGroups,
@@ -16,6 +16,7 @@ import { DEFAULT_LOCATION_ID, availableServings, barcodeMatch, expiryAlerts, loc
 import { buildSystemNotifications } from './notifications.js';
 import { debtAmount, debtPaid, normalizeDebt, resolveDebts } from './debts.js';
 import { buildAuditSnapshot } from './audit-center.js';
+import { authEmailKey, findAuthorizedRecord, normalizeAuthEmail } from './auth-session.mjs';
 import { buildEmployeeDependencySummary, EMPLOYEE_DEPENDENCY_ENTITIES, isEmployeeOperationallyActive } from './employee-lifecycle.js';
 export { permissionGroups } from './permissions.js';
 
@@ -160,7 +161,7 @@ export const defaultCats = [
 
 let currentUserProfile = null;
 let authInitialized = false;
-const AUTH_TIMEOUT_MS = 10000;
+const AUTH_TIMEOUT_MS = 30000;
 let authWaitPromise = null;
 const authTimeoutError = () => Object.assign(new Error('تعذر التحقق من جلسة تسجيل الدخول'), { code: 'AUTH_TIMEOUT' });
 const withAuthTimeout = (promise) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(authTimeoutError()), AUTH_TIMEOUT_MS))]);
@@ -195,8 +196,8 @@ async function fetchUserProfile(uid) {
   return null;
 }
 
-const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
-const normalizedEmailKey = (email) => normalizeEmail(email).replace(/[.#$\[\]/]/g, '_');
+const normalizeEmail = normalizeAuthEmail;
+const normalizedEmailKey = authEmailKey;
 const normalizeArabic = (value) => String(value || '').trim().toLowerCase().replace(/[ًٌٍَُِّْـ]/g, '').replace(/[إأآ]/g, 'ا').replace(/ى/g, 'ي').replace(/\s+/g, ' ');
 const normalizeName = (value) => normalizeArabic(value);
 const inventoryCategoryDefaults = ['قهوة مخفقة', 'قهوة إيلي', 'الحليب', 'العصائر', 'مشروبات ساخنة', 'مشروبات باردة', 'المنظفات', 'مياه الشرب', 'أدوات', 'مواد غذائية / مؤنة', 'حلويات', 'ساندويتشات', 'إضافات / أخرى'];
@@ -1094,9 +1095,14 @@ export const api = {
   },
   login: async () => {
     try {
+      await setPersistence(auth, browserLocalPersistence);
       const provider = new GoogleAuthProvider();
       const userCredential = await withAuthTimeout(signInWithPopup(auth, provider));
-      return resolveSession(userCredential.user);
+      const user = userCredential?.user;
+      if (!user?.uid || !normalizeEmail(user.email)) throw Object.assign(new Error('لم يرجع Firebase مستخدمًا صالحًا.'), { code: 'AUTH_USER_INVALID' });
+      await user.getIdToken();
+      console.info('AUTH_POPUP_SUCCESS', { uidPresent: true, emailPresent: true });
+      return resolveSession(user);
     } catch (err) {
       console.error('SESSION_FAILED', err);
       if (err.message === 'هذا الحساب موقوف.' || err.message === 'هذا الحساب غير مخول لاستخدام النظام.' || err.code === 'AUTH_TIMEOUT') throw err;
@@ -1108,7 +1114,9 @@ export const api = {
   loginLocal: async (email, password) => {
     if (typeof window === 'undefined' || !['localhost', '127.0.0.1'].includes(window.location.hostname) || !import.meta.env.DEV) throw new Error('دخول الاختبار المحلي متاح أثناء التطوير المحلي فقط.');
     try {
+      await setPersistence(auth, browserLocalPersistence);
       const userCredential = await withAuthTimeout(signInWithEmailAndPassword(auth, String(email || '').trim(), String(password || '')));
+      await userCredential.user.getIdToken();
       return resolveSession(userCredential.user);
     } catch (err) {
       if (err.message === 'هذا الحساب موقوف.' || err.message === 'هذا الحساب غير مخول لاستخدام النظام.' || err.code === 'AUTH_TIMEOUT') throw err;
@@ -2342,17 +2350,28 @@ export const api = {
 };
 
 async function resolveSession(user) {
+  if (!user?.uid) throw Object.assign(new Error('تعذر التحقق من هوية الحساب.'), { code: 'AUTH_USER_INVALID' });
+  await user.getIdToken();
+  console.info('AUTH_USER_READY', { uidPresent: true, emailPresent: Boolean(normalizeEmail(user.email)) });
   const existing = await fetchUserProfile(user.uid);
   if (!existing) {
+    if (!normalizeEmail(user.email)) throw Object.assign(new Error('تعذر التحقق من هوية الحساب.'), { code: 'AUTH_USER_INVALID' });
     let authorized = null;
+    console.info('AUTHORIZED_USER_LOOKUP_START');
     try {
       authorized = await api.get(`authorized_users/${normalizedEmailKey(user.email)}`);
+      if (authorized && normalizeEmail(authorized.email) !== normalizeEmail(user.email)) authorized = null;
     } catch (error) {
       console.error('SESSION_FAILED', { code: error.code || 'PROFILE_LOOKUP_FAILED' });
       if (error.code !== 'PERMISSION_DENIED' && error.code !== 'permission-denied') throw error;
     }
-    if (!authorized) { await signOut(auth); currentUserProfile = null; throw new Error('هذا الحساب غير مخول لاستخدام النظام.'); }
+    if (!authorized) {
+      const snap = await get(query(ref(db, 'authorized_users'), orderByChild('email'), equalTo(normalizeEmail(user.email))));
+      authorized = findAuthorizedRecord(snap.exists() ? snap.val() : null, user.email);
+    }
+    if (!authorized) { console.info('AUTHORIZED_USER_NOT_FOUND'); await signOut(auth); currentUserProfile = null; throw Object.assign(new Error('هذا الحساب غير مخول لاستخدام النظام.'), { code: 'AUTH_UNAUTHORIZED' }); }
     if (authorized.active === false || authorized.status === 'disabled') { await signOut(auth); currentUserProfile = null; throw new Error('هذا الحساب موقوف.'); }
+    console.info('AUTHORIZED_USER_FOUND', { role: authorized.role || 'employee' });
     const permissions = permissionsFromFirebase(authorized.permissions || {});
     currentUserProfile = { id: user.uid, name: authorized.name || user.displayName || '', email: user.email, role: authorized.role || 'employee', permissions, active: true };
     await set(ref(db, `users/${user.uid}`), { ...currentUserProfile, permissions: permissionsToRules(permissions), updated_at: new Date().toISOString() });
@@ -2370,5 +2389,7 @@ async function resolveSession(user) {
   else if (currentUserProfile.role === 'viewer') perms = ['dashboard.view', 'reports.view'];
   if (perms.includes('expenses.create')) perms.push('pos.view');
   const session = { user: currentUserProfile, permissions: perms };
+  console.info('ROLE_LOAD_SUCCESS', { role: currentUserProfile.role, permissionCount: perms.length });
+  console.info('SESSION_READY');
   return session;
 }

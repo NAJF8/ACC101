@@ -1,6 +1,6 @@
 import { initializeApp } from "firebase/app";
-import { connectAuthEmulator, getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, GoogleAuthProvider, signInWithPopup } from "firebase/auth";
-import { connectDatabaseEmulator, getDatabase, ref, set, get, push, update, remove, onValue, serverTimestamp, runTransaction } from "firebase/database";
+import { browserLocalPersistence, connectAuthEmulator, getAuth, onAuthStateChanged, setPersistence, signInWithEmailAndPassword, signOut, GoogleAuthProvider, signInWithPopup } from "firebase/auth";
+import { connectDatabaseEmulator, equalTo, getDatabase, orderByChild, query, ref, set, get, push, update, remove, onValue, serverTimestamp, runTransaction } from "firebase/database";
 
 const firebaseConfig = {
   apiKey: import.meta.env?.VITE_FIREBASE_API_KEY || "AIzaSyCzmUhkN29ey7B1BpexJvgh8miI2RlAn74",
@@ -29,4 +29,4 @@ if (localQa) {
   connectDatabaseEmulator(db, "127.0.0.1", 9000);
 }
 
-export { app, auth, db, ref, set, get, push, update, remove, onValue, serverTimestamp, runTransaction, onAuthStateChanged, signInWithEmailAndPassword, signOut, GoogleAuthProvider, signInWithPopup };
+export { app, auth, db, ref, set, get, push, update, remove, onValue, serverTimestamp, runTransaction, onAuthStateChanged, setPersistence, browserLocalPersistence, signInWithEmailAndPassword, signOut, GoogleAuthProvider, signInWithPopup, query, orderByChild, equalTo };
