@@ -411,6 +411,15 @@ export const buildMonthlyFinancialAggregation = ({ sources = {}, month = 'all' }
   return { rows: active, record_count: active.length, cash_outflow: total(), operating_expenses: total((row) => row.accounting_class === 'operating_expense' || row.accounting_class === 'expense'), purchases: total((row) => ['purchase', 'supplies'].includes(row.accounting_class) || row.__source === 'purchases'), payroll: total((row) => row.accounting_class === 'payroll'), assets: total((row) => row.accounting_class === 'fixed_asset'), other: total((row) => !['operating_expense', 'expense', 'purchase', 'supplies', 'payroll', 'fixed_asset'].includes(row.accounting_class)), categories: Object.values(categories).filter((item) => item.total > 0), duplicates: duplicateKeys.size, unresolved: active.filter((row) => !getRecordMonth(row) || !hasStableIdentity(row)).length };
 };
 
+export const buildDateRangeFinancialAggregation = ({ sources = {}, fromDate = '', toDate = '' } = {}) => {
+  const filteredSources = Object.fromEntries(Object.entries(sources).map(([source, rows]) => [source, (rows || []).filter((row) => {
+    if (row.deleted) return false;
+    const date = getRecordDate(row);
+    return date && (!fromDate || date >= fromDate) && (!toDate || date <= toDate);
+  })]));
+  return buildMonthlyFinancialAggregation({ sources: filteredSources, month: 'all' });
+};
+
 export const calculatePayroll = (payroll = {}, adjustments = [], payments = [], employee) => {
   const relevant = adjustments.filter((item) => item.payroll_id === payroll.id || (item.employee_id === payroll.employee_id && item.month === payroll.month));
   const total = (type) => relevant.filter((item) => item.type === type).reduce((n, item) => n + Number(item.amount || 0), 0);
