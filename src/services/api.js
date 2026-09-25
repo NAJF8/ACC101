@@ -2363,8 +2363,10 @@ async function resolveSession(user) {
       authorized = await api.get(`authorized_users/${normalizedEmailKey(user.email)}`);
       if (authorized && normalizeEmail(authorized.email) !== normalizeEmail(user.email)) authorized = null;
     } catch (error) {
-      console.error('SESSION_FAILED', { code: error.code || 'PROFILE_LOOKUP_FAILED' });
-      if (error.code !== 'PERMISSION_DENIED' && error.code !== 'permission-denied') throw error;
+      const permissionDenied = /permission[ _-]?denied/i.test(`${error.code || ''} ${error.message || ''}`);
+      if (permissionDenied) console.info('AUTHORIZED_USER_DIRECT_LOOKUP_MISS');
+      else console.error('SESSION_FAILED', { code: error.code || 'PROFILE_LOOKUP_FAILED' });
+      if (!permissionDenied) throw error;
     }
     if (!authorized) {
       const snap = await get(query(ref(db, 'authorized_users'), orderByChild('email'), equalTo(normalizeEmail(user.email))));
