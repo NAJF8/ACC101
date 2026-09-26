@@ -40,6 +40,7 @@ export const permissionGroups = {
   system: ['system.reset']
   ,partners: ['partners.view', 'partners.manage']
   ,establishment: ['establishment.view', 'establishment.manage']
+  ,pos: ['pos.view', 'pos.sales_view', 'pos.expenses_view', 'pos.reports_view', 'pos.reconciliation_view']
 };
 
 export const permissionGroupLabels = {
@@ -70,6 +71,7 @@ export const permissionGroupLabels = {
   system: 'النظام'
   ,partners: 'الشركاء ورأس المال'
   ,establishment: 'تكاليف التأسيس والافتتاح'
+  ,pos: 'نقاط البيع (POS)'
 };
 
 // Firebase Realtime Database does not allow . # $ [ ] / in child keys.
@@ -233,6 +235,7 @@ export const permissionLabels = {
   'monthly_periods.view': 'عرض الأشهر المالية',
   'monthly_periods.close': 'إغلاق الشهر',
   'monthly_periods.reopen': 'إعادة فتح الشهر'
+  ,'pos.view': 'عرض قسم POS', 'pos.sales_view': 'عرض مبيعات POS', 'pos.expenses_view': 'عرض مصاريف POS', 'pos.reports_view': 'عرض تقارير POS', 'pos.reconciliation_view': 'عرض المطابقة المالية'
 };
 
 export const roleLabels = {
@@ -275,7 +278,8 @@ const permissionAliases = {
   'cash_movements.view': 'cash.view',
   'cash_movements.create': 'cash.create',
   'cash_movements.edit': 'cash.edit',
-  'cash_movements.delete': 'cash.delete'
+  'cash_movements.delete': 'cash.delete',
+  'pos.sales_view': 'pos.view', 'pos.expenses_view': 'pos.view', 'pos.reports_view': 'pos.view', 'pos.reconciliation_view': 'pos.view'
 };
 
 export const hasPermission = (session, permission) => Boolean(

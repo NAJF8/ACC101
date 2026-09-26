@@ -12,7 +12,7 @@ import {
 } from './permissions.js';
 import { amountOf, buildCashCarryForward, buildPeriodComparison, buildAccountReview, buildEstablishmentReport, buildPartnerCapitalSummary, countCashDenominations, buildMonthCloseReview, buildPayrollRows, calculatePayroll, calculatePayrollWithDebts, calculatePayable, cashSourceKey, currentMonth, filterRecordsByDateRange, getAvailableMonths, getCashMonthSummary, getImmediateCashPurchasePaid, getMonthlyCashMovement, getMonthlyExpenses, getMonthlyLegacyWithdrawals, getMonthlyOtherIncome, getMonthlyPayrollCost, getMonthlyPayrollPaid, getMonthlyPurchases, getMonthlyProfit, getMonthlySales, getMonthlySalesBreakdown, getRecordDate, getRecordMonth, getSalesTransactionNet, isCashPayment, localBusinessDate, money, nextMonth, normalizePaymentMethod, resolvePaymentMethod, previousMonth, recordsForMonth, resolvePurchaseRows, sum } from './financial.js';
 import { createDashboardRefreshScheduler } from './dashboard-realtime.js';
-import { DEFAULT_LOCATION_ID, availableServings, barcodeMatch, expiryAlerts, locationBalances, locationQuantity, makeInternalCode, recipeCost, roundInventory, selectFefoBatches, toBaseQuantity, weightedAverageCost, inventoryQuantity } from './inventory.js';
+import { DEFAULT_LOCATION_ID, availableServings, barcodeMatch, expiryAlerts, finishedProductQuantity, isFinishedProduct, locationBalances, locationQuantity, makeInternalCode, recipeCost, roundInventory, selectFefoBatches, toBaseQuantity, weightedAverageCost, inventoryQuantity } from './inventory.js';
 import { buildSystemNotifications } from './notifications.js';
 import { debtAmount, debtPaid, normalizeDebt, resolveDebts } from './debts.js';
 import { buildAuditSnapshot } from './audit-center.js';
@@ -252,6 +252,10 @@ const validateSaleRecipeAvailability = async (saleData) => {
   const byId = new Map(inventory.map((item) => [item.id, item]));
   const requiredMaterials = new Map();
   for (const saleItem of itemsToSell) {
+    const product = await api.get(`products/${saleItem.product_id}`);
+    if (isFinishedProduct(product) && Number(product.ready_stock_quantity || 0) < Number(saleItem.quantity || 0)) {
+      throw new Error(`رصيد المنتج الجاهز لا يكفي: ${product.name_ar || product.name || saleItem.product_id}`);
+    }
     const recipe = await api.get(`product_recipes/${saleItem.product_id}`);
     if (!recipe?.items?.length) continue;
     for (const line of recipe.items) {
@@ -272,15 +276,84 @@ const saleConsumptionExists = async (sale = {}) => {
   const operations = await Promise.all(keys.map((key) => api.get(`inventory_operations/${key}`).catch(() => null)));
   return operations.some((operation) => operation?.status === 'completed');
 };
+const consumeFinishedProductStock = async (productId, quantity, source = {}) => {
+  const amount = Number(quantity || 0);
+  if (!productId || !Number.isFinite(amount) || amount <= 0) return { skipped: true };
+  const key = operationKeyFor('finished-sale', source.operation_id || source.source_id || `${productId}:${source.date || ''}`);
+  const claim = await claimOperation('finished_product_operations', key, { id: key, status: 'pending', source_type: 'sale', product_id: productId, quantity: amount, created_at: new Date().toISOString(), created_by: auth.currentUser?.uid || 'system' });
+  if (!claim.committed) return { already_processed: true, operation_key: key };
+  const product = await api.get(`products/${productId}`);
+  if (!product || !isFinishedProduct(product)) { await update(ref(db, `finished_product_operations/${key}`), { status: 'skipped', completed_at: new Date().toISOString() }); return { skipped: true, operation_key: key }; }
+  const stockRef = ref(db, `products/${productId}/ready_stock_quantity`);
+  let before = 0, after = 0;
+  const stockSnapshot = await get(stockRef);
+  const seedBefore = Number(stockSnapshot.val() || 0);
+  const stockClaim = await runTransaction(stockRef, (current) => { before = current == null ? seedBefore : Number(current); after = roundInventory(before - amount); if (before < amount) return; return after; });
+  if (!stockClaim.committed) { await update(ref(db, `finished_product_operations/${key}`), { status: 'failed', error: 'INSUFFICIENT_FINISHED_STOCK', completed_at: new Date().toISOString() }); throw new Error(`رصيد المنتج الجاهز لا يكفي: ${product.name_ar || product.name || productId}`); }
+  const movementRef = push(ref(db, 'finished_product_movements')); const now = new Date().toISOString();
+  await update(ref(db), { [`finished_product_movements/${movementRef.key}`]: { id: movementRef.key, type: 'sale', stock_entity_type: 'finished_product', product_id: productId, product_name: product.name_ar || product.name || '', quantity: amount, unit: product.stock_unit || product.unit || 'piece', quantity_delta: -amount, before_quantity: before, after_quantity: after, source_type: 'sale', source_id: source.source_id || '', source_key: source.source_key || `sale:${source.source_id || key}`, operation_id: key, date: source.date || now.slice(0, 10), month: source.month || getRecordMonth(source), created_at: now, created_by: auth.currentUser?.uid || 'system' }, [`finished_product_operations/${key}/status`]: 'completed', [`finished_product_operations/${key}/movement_id`]: movementRef.key, [`finished_product_operations/${key}/completed_at`]: now });
+  return { skipped: false, already_processed: false, operation_key: key };
+};
 
 const cashSourceType = (entity) => ({ purchases: 'purchase', expenses: 'expense', sales: 'sale', other_income: 'other_income' }[entity]);
 const cashIsInflow = (sourceType) => sourceType === 'sale' || sourceType === 'other_income';
 const isCashMethod = isCashPayment;
+const posExpenseFingerprint = (payload = {}) => JSON.stringify({
+  source_channel: payload.source_channel || '',
+  source_key: payload.source_key || '',
+  amount: Number(payload.amount || 0),
+  date: payload.date || '',
+  description: payload.description || payload.details || '',
+  cashier_uid: payload.cashier_uid || '',
+  shift_id: payload.shift_id || '',
+  payment_method: normalizePaymentMethod(payload.payment_method) || '',
+});
+const posReadKey = (value, fallback) => cleanSaleKey(value || fallback || '').replace(/[.#$\[\]/]/g, '_');
+const isPosSource = (row = {}) => String(row.source_channel || '').toUpperCase() === 'POS101';
+const posReadPath = (collection, row, fallback) => `pos_read_models/${collection}/${posReadKey(row.source_key || row.operation_key || row.id, fallback)}`;
+const posSaleReadModel = (row, id) => withoutUndefined({
+  id,
+  source_channel: 'POS101', source_key: row.source_key || row.operation_key || id, source_id: id,
+  operation_key: row.operation_key || row.source_key || id, date: row.date || null, month: row.month || null,
+  created_at: row.created_at || null, updated_at: row.updated_at || null,
+  cashier_uid: row.cashier_uid || row.created_by || null, cashier_name: row.cashier_name || row.created_by_name || null,
+  shift_id: row.shift_id || null, payment_method: row.payment_method || null, order_type: row.order_type || null,
+  quantity: Number(row.quantity || 0), subtotal: Number(row.subtotal || 0), discount_amount: Number(row.discount_amount || 0),
+  total_after_discount: Number(row.total_after_discount || 0), status: row.status || 'completed',
+  inventory_consumption_status: row.inventory_consumption_status || null,
+  items: Array.isArray(row.items) ? row.items.map((item) => withoutUndefined({ product_id: item.product_id || null, product_name: item.product_name || item.name || null, quantity: Number(item.quantity || 0), unit_price: Number(item.unit_price || item.price || 0), total: Number(item.total || (Number(item.quantity || 0) * Number(item.unit_price || item.price || 0)) || 0) })) : undefined,
+});
+const posExpenseReadModel = (row, id) => withoutUndefined({
+  id, source_channel: 'POS101', source_key: row.source_key || id, source_id: id,
+  date: row.date || null, month: row.month || null, created_at: row.created_at || null, updated_at: row.updated_at || null,
+  cashier_uid: row.cashier_uid || row.created_by || null, cashier_name: row.cashier_name || row.created_by_name || null,
+  shift_id: row.shift_id || null, payment_method: row.payment_method || null, amount: Number(row.amount || 0),
+  description: row.description || row.details || null, category: row.category || null, category_name: row.category_name || null,
+  paid_amount: Number(row.paid_amount || 0), remaining_amount: Number(row.remaining_amount || 0), payment_status: row.payment_status || null,
+  notes: row.notes || null, deleted: row.deleted === true,
+});
+const posCashReadModel = (row, id) => withoutUndefined({
+  id, source_channel: 'POS101', source_key: row.source_key || `pos101:cash:${row.source_id || id}`, source_id: row.source_id || null,
+  date: row.date || null, month: row.month || null, created_at: row.created_at || null,
+  cashier_uid: row.cashier_uid || row.created_by || null, cashier_name: row.cashier_name || null, shift_id: row.shift_id || null,
+  type: row.type || null, amount: Number(row.amount || 0), payment_method: row.payment_method || null,
+  source_type: row.source_type || null, source_key_ref: row.source_key || null, deleted: row.deleted === true,
+});
+const posShiftReadModel = (row, id) => withoutUndefined({
+  id, source_channel: 'POS101', source_key: row.source_key || `pos101:shift:${id}`, source_id: id,
+  month: row.month || null, opened_at: row.opened_at || null, closed_at: row.closed_at || null,
+  cashier_uid: row.cashier_uid || null, cashier_name: row.cashier_name || null, status: row.status || null,
+  opening_cash: Number(row.opening_cash || 0), expected_cash: row.expected_cash == null ? null : Number(row.expected_cash),
+  actual_cash: row.actual_cash == null ? null : Number(row.actual_cash), difference: row.difference == null ? null : Number(row.difference),
+  denomination_counts: row.denomination_counts || undefined, explanation: row.explanation || null,
+});
+const posReadModelWrite = (collection, row, id) => ({ [posReadPath(collection, row, id)]: collection === 'sales' ? posSaleReadModel(row, id) : collection === 'expenses' ? posExpenseReadModel(row, id) : collection === 'cash_movements' ? posCashReadModel(row, id) : posShiftReadModel(row, id) });
 // A stocktake can be approved more than once from separate clients.  Keep the
 // movement IDs deterministic so an acknowledgement lost after the atomic update
 // can be reconciled without applying the snapshot variance a second time.
 const stocktakeMovementId = (stocktakeId, itemId) => `stocktake_${String(stocktakeId)}_${String(itemId)}`.replace(/[.#$\[\]/]/g, '_');
 const isInventoryPurchase = (record = {}) => record.purchase_type === 'inventory' && Boolean(record.inventory_item_id);
+const isFinishedProductPurchase = (record = {}) => record.purchase_type === 'product' && Boolean(record.product_id);
 const inventoryPurchaseBaseQuantity = (record = {}, item = {}) => toBaseQuantity({
   quantity: Number(record.quantity || 0),
   unit: record.unit || item.unit || item.base_unit,
@@ -297,11 +370,15 @@ const createAutoCashMovement = async (sourceType, sourceId, data) => {
   if (!sourceType || !sourceId || !isCashPayment(data.payment_method)) return null;
   const existing = await listCashMovementsForSync().catch(() => []);
   const source_key = cashSourceKey(sourceType, sourceId);
-  if (existing.some((row) => (row.source_key === source_key || (row.source_type === sourceType && row.source_id === sourceId)) && !row.deleted)) return existing.find((row) => row.source_key === source_key || (row.source_type === sourceType && row.source_id === sourceId));
+  if (existing.some((row) => (row.source_key === source_key || (row.source_type === sourceType && row.source_id === sourceId)) && !row.deleted)) {
+    const found = existing.find((row) => row.source_key === source_key || (row.source_type === sourceType && row.source_id === sourceId));
+    if (isPosSource(data)) await update(ref(db), posReadModelWrite('cash_movements', { ...found, source_channel: 'POS101', cashier_uid: data.cashier_uid, cashier_name: data.cashier_name, shift_id: data.shift_id }, found.id));
+    return found;
+  }
   const movementRef = push(ref(db, 'cash_movements'));
   const amount = Number(data.total_after_discount ?? data.amount ?? 0);
   const item = withoutUndefined({ id: movementRef.key, type: cashIsInflow(sourceType) ? 'IN' : 'OUT', amount, date: data.date || new Date().toISOString().slice(0, 10), month: getRecordMonth(data), reason: data.reason || `تلقائي: ${sourceType}`, payment_method: 'cash', source_type: sourceType, source_id: sourceId, source_key, auto: true, created_at: new Date().toISOString(), created_by: auth.currentUser?.uid || 'system' });
-  await set(movementRef, item);
+  await update(ref(db), { [`cash_movements/${movementRef.key}`]: item, ...(isPosSource(data) ? posReadModelWrite('cash_movements', { ...item, source_channel: 'POS101', cashier_uid: data.cashier_uid, cashier_name: data.cashier_name, shift_id: data.shift_id }, movementRef.key) : {}) });
   await api.logAudit('CASH_MOVEMENT_AUTO_CREATED', 'cash_movements', movementRef.key, item).catch(() => null);
   return item;
 };
@@ -1143,6 +1220,16 @@ export const api = {
     const data = snap.val();
     return Object.keys(data).map(key => ({ id: key, ...data[key] }));
   },
+  listPosData: async () => {
+    await requirePermission('pos.view');
+    const readModel = async (collection) => {
+      const snap = await get(ref(db, `pos_read_models/${collection}`));
+      const value = snap.exists() ? snap.val() : {};
+      return Object.keys(value || {}).map((id) => ({ id, ...value[id] }));
+    };
+    const [sales, expenses, movements, shifts] = await Promise.all(['sales', 'expenses', 'cash_movements', 'shifts'].map(readModel));
+    return { sales, expenses, movements, shifts };
+  },
   subscribeCollection: (entity, onData, onError) => {
     let stopped = false;
     const unsubscribe = onValue(ref(db, entity), (snap) => {
@@ -1510,8 +1597,8 @@ export const api = {
     const shifts = await api.list('cashier_shifts').catch(() => []);
     if (shifts.some((row) => row.cashier_uid === cashierUid && row.status === 'open')) throw new Error('لديك وردية مفتوحة بالفعل.');
     const now = new Date().toISOString(); const shiftRef = push(ref(db, 'cashier_shifts'));
-    const item = { id: shiftRef.key, cashier_uid: cashierUid, cashier_name: s.user.name || '', opened_at: now, opening_cash: money(opening_cash), opened_by: cashierUid, status: 'open', note: String(note), month };
-    await set(shiftRef, item); await api.logAudit('SHIFT_OPENED', 'cashier_shifts', item.id, item); return item;
+    const item = { id: shiftRef.key, source_channel: 'POS101', source_key: `pos101:shift:${shiftRef.key}`, cashier_uid: cashierUid, cashier_name: s.user.name || '', opened_at: now, opening_cash: money(opening_cash), opened_by: cashierUid, status: 'open', note: String(note), month };
+    await update(ref(db), { [`cashier_shifts/${shiftRef.key}`]: item, ...posReadModelWrite('shifts', item, shiftRef.key) }); await api.logAudit('SHIFT_OPENED', 'cashier_shifts', item.id, item); return item;
   },
 
   closeCashierShift: async ({ shift_id, actual_cash, denomination_counts = {}, explanation = '' } = {}) => {
@@ -1524,6 +1611,7 @@ export const api = {
     const item = { ...shift, expected_cash: expected, actual_cash: counted, difference: counted - expected, denomination_counts, closed_at: now, closed_by: s.user.id, explanation: String(explanation), status: 'closed' };
     const committed = await runTransaction(ref(db, `cashier_shifts/${shift_id}`), (current) => current?.status === 'open' ? item : undefined);
     if (!committed.committed) return { ...(committed.snapshot.val() || shift), idempotent: true };
+    await update(ref(db), posReadModelWrite('shifts', item, shift_id));
     await api.logAudit('SHIFT_CLOSED', 'cashier_shifts', shift_id, item); return item;
   },
 
@@ -1672,10 +1760,24 @@ export const api = {
     let existingSaleOperation = null;
     const suppliedOperationKey = entity === 'sales' && payload?.operation_key ? cleanSaleKey(payload.operation_key) : '';
     if (entity === 'sales' && suppliedOperationKey) existingSaleOperation = (await get(ref(db, `sales_operations/${suppliedOperationKey}`))).val();
+    const suppliedPosExpenseKey = entity === 'expenses' && payload?.source_channel === 'POS101' && payload?.source_key
+      ? cleanSaleKey(payload.source_key)
+      : '';
+    const stableExpenseId = suppliedPosExpenseKey ? `expense-${suppliedPosExpenseKey}` : '';
+    if (stableExpenseId) {
+      const existingExpense = await api.get(`expenses/${stableExpenseId}`).catch(() => null);
+      if (existingExpense) {
+        if (existingExpense.pos_fingerprint && existingExpense.pos_fingerprint !== posExpenseFingerprint(payload)) {
+          throw Object.assign(new Error('تعارض في source_key: المفتاح مستخدم لمحتوى مصروف مختلف.'), { code: 'OPERATION_KEY_CONFLICT' });
+        }
+        if (isPosSource(existingExpense)) await update(ref(db), posReadModelWrite('expenses', existingExpense, existingExpense.id));
+        return { ...existingExpense, already_processed: true, source_key: payload.source_key };
+      }
+    }
     const stableSaleId = entity === 'sales' && suppliedOperationKey
       ? (suppliedId || existingSaleOperation?.sale_id || `sale-${suppliedOperationKey}`)
       : suppliedId;
-    const newRef = stableSaleId ? ref(db, `${entity}/${stableSaleId}`) : push(ref(db, entity));
+    const newRef = stableSaleId ? ref(db, `${entity}/${stableSaleId}`) : stableExpenseId ? ref(db, `${entity}/${stableExpenseId}`) : push(ref(db, entity));
     const now = new Date().toISOString();
     const cleanPayload = entity === 'purchases' ? normalizePurchasePayload(payload) : withoutUndefined(payload);
     if (financialEntities.has(entity)) await checkMonthOpen(getRecordMonth(cleanPayload));
@@ -1697,15 +1799,21 @@ export const api = {
       const existingOperation = claim.snapshot.val();
       if (!claim.committed && existingOperation?.fingerprint && existingOperation.fingerprint !== fingerprint) throw Object.assign(new Error('تعارض في operation_key: المفتاح مستخدم لمحتوى بيع مختلف.'), { code: 'OPERATION_KEY_CONFLICT' });
       if (!claim.committed && existingOperation?.sale_id && existingOperation.sale_id !== newRef.key) throw Object.assign(new Error('تعارض في معرف البيع المحلي للعملية.'), { code: 'SALE_ID_CONFLICT' });
-      if (!claim.committed && existingOperation?.status === 'completed') { const existingSale = existingOperation.sale_id ? await api.get(`sales/${existingOperation.sale_id}`).catch(() => null) : null; return { ...(existingSale || {}), already_processed: true, operation_key: data.operation_key || sourceKey }; }
+      if (!claim.committed && existingOperation?.status === 'completed') {
+        const existingSale = existingOperation.sale_id ? await api.get(`sales/${existingOperation.sale_id}`).catch(() => null) : null;
+        if (existingSale && isPosSource(existingSale)) await update(ref(db), posReadModelWrite('sales', existingSale, existingSale.id));
+        return { ...(existingSale || {}), already_processed: true, operation_key: data.operation_key || sourceKey };
+      }
       await validateSaleRecipeAvailability(data);
-      await set(newRef, data);
+      await update(ref(db), { [`sales/${newRef.key}`]: data, ...(isPosSource(data) ? posReadModelWrite('sales', data, newRef.key) : {}) });
       try {
         const itemsToSell = data.items || [{ product_id: data.product_id, quantity: data.quantity }];
         let recipeFound = false;
         for (let i = 0; i < itemsToSell.length; i++) {
-          const saleItem = itemsToSell[i]; const recipe = await api.get(`product_recipes/${saleItem.product_id}`);
-          if (recipe?.items?.length) { recipeFound = true; const suffix = itemsToSell.length > 1 ? `:${saleItem.product_id}:${i}` : ''; await api.consumeRecipe(saleItem.product_id, saleItem.quantity, { source_type: 'sale', source_id: newRef.key, source_key: `sale:${sourceKey}${suffix}`, operation_id: `sale:${sourceKey}${suffix}`, month: data.month, date: data.date }); }
+          const saleItem = itemsToSell[i]; const product = await api.get(`products/${saleItem.product_id}`); const suffix = itemsToSell.length > 1 ? `:${saleItem.product_id}:${i}` : '';
+          if (isFinishedProduct(product)) { recipeFound = true; await consumeFinishedProductStock(saleItem.product_id, saleItem.quantity, { source_type: 'sale', source_id: newRef.key, source_key: `sale:${sourceKey}${suffix}`, operation_id: `sale:${sourceKey}${suffix}`, month: data.month, date: data.date }); continue; }
+          const recipe = await api.get(`product_recipes/${saleItem.product_id}`);
+          if (recipe?.items?.length) { recipeFound = true; await api.consumeRecipe(saleItem.product_id, saleItem.quantity, { source_type: 'sale', source_id: newRef.key, source_key: `sale:${sourceKey}${suffix}`, operation_id: `sale:${sourceKey}${suffix}`, month: data.month, date: data.date }); }
         }
         if (!recipeFound) { data.inventory_consumption_status = 'no_recipe'; await update(ref(db, `sales/${newRef.key}`), { inventory_consumption_status: 'no_recipe' }); }
       } catch (error) {
@@ -1713,6 +1821,10 @@ export const api = {
         throw new Error(`تم تسجيل البيع، لكن تعذر خصم مكونات الوصفة ويحتاج إلى مراجعة: ${error.message || 'خطأ غير معروف'}`);
       }
       await update(ref(db, `sales_operations/${sourceKey}`), { status: 'completed', completed_at: new Date().toISOString() });
+      if (isPosSource(data)) {
+        const latestSale = await api.get(`sales/${newRef.key}`).catch(() => data);
+        await update(ref(db), posReadModelWrite('sales', latestSale, newRef.key));
+      }
     } else if (entity === 'other_income') {
       const categoryId = data.category_id || data.category;
       if (categoryId) {
@@ -1728,7 +1840,8 @@ export const api = {
       data.paid_amount = state.paid;
       data.remaining_amount = state.remaining;
       data.payment_status = state.status;
-      const expenseWrites = { [`expenses/${newRef.key}`]: data };
+      if (suppliedPosExpenseKey) data.pos_fingerprint = posExpenseFingerprint(payload);
+       const expenseWrites = { [`expenses/${newRef.key}`]: data, ...(isPosSource(data) ? posReadModelWrite('expenses', data, newRef.key) : {}) };
       if (state.remaining > 0) expenseWrites[`debts/expense:${newRef.key}`] = withoutUndefined({
         id: `expense:${newRef.key}`,
         type: 'payable',
@@ -1799,6 +1912,31 @@ export const api = {
           created_at: now,
           created_by: auth.currentUser?.uid || 'system',
         }),
+      };
+      await update(ref(db), updates);
+      data = purchaseData;
+    } else if (entity === 'purchases' && isFinishedProductPurchase(data)) {
+      const product = await api.get(`products/${data.product_id}`);
+      if (!product) throw new Error('المنتج الجاهز غير موجود.');
+      const quantity = Number(data.quantity || 0);
+      if (!Number.isFinite(quantity) || quantity <= 0) throw new Error('كمية المنتج الجاهز غير صحيحة.');
+      const operationKey = operationKeyFor('purchase', data.operation_key || newRef.key);
+      const existingOperation = await api.get(`finished_product_operations/${operationKey}`).catch(() => null);
+      if (existingOperation?.status === 'completed') {
+        const existingPurchase = await api.get(`purchases/${existingOperation.result_id}`).catch(() => null);
+        return { ...(existingPurchase || data), already_processed: true, operation_key: operationKey };
+      }
+      const before = finishedProductQuantity(product);
+      const after = roundInventory(before + quantity);
+      const movementRef = push(ref(db, 'finished_product_movements'));
+      const purchaseData = withoutUndefined({ ...data, purchase_type: 'product', stock_entity_type: 'finished_product', operation_key: operationKey, ready_stock_quantity_added: quantity, finished_stock_source_key: `purchase:${newRef.key}`, total_after_discount: data.total_after_discount ?? inventoryPurchaseTotal(data) });
+      const updates = {
+        [`purchases/${newRef.key}`]: purchaseData,
+        [`products/${product.id}/ready_stock_quantity`]: after,
+        [`products/${product.id}/stock_type`]: 'finished_product',
+        [`products/${product.id}/stock_unit`]: data.unit || product.stock_unit || product.unit || 'piece',
+        [`finished_product_movements/${movementRef.key}`]: withoutUndefined({ id: movementRef.key, type: 'purchase', stock_entity_type: 'finished_product', product_id: product.id, product_name: data.product_name || product.name_ar || product.name || '', quantity, unit: data.unit || product.stock_unit || product.unit || 'piece', quantity_delta: quantity, before_quantity: before, after_quantity: after, source_type: 'purchase', source_id: newRef.key, source_key: `purchase:${newRef.key}`, operation_id: operationKey, date: data.date || new Date().toISOString().slice(0, 10), month: getRecordMonth(data), created_at: now, created_by: auth.currentUser?.uid || 'system' }),
+        [`finished_product_operations/${operationKey}`]: { id: operationKey, status: 'completed', kind: 'finished_product_purchase', result_id: newRef.key, product_id: product.id, quantity, created_at: now, created_by: auth.currentUser?.uid || 'system' },
       };
       await update(ref(db), updates);
       data = purchaseData;
@@ -1931,6 +2069,9 @@ export const api = {
       const payable = buildExpensePayable({ expense: merged, userId: auth.currentUser?.uid || 'system', now: new Date().toISOString() });
       await update(ref(db), { [`debts/expense:${id}`]: payable || null });
     }
+    if (['sales', 'expenses'].includes(entity) && isPosSource({ ...oldData, ...data })) {
+      await update(ref(db), posReadModelWrite(entity, { ...oldData, ...data }, id));
+    }
     const updateAudit = entity === 'other_income' ? 'OTHER_INCOME_UPDATED' : entity === 'employees' ? 'EMPLOYEE_UPDATED' : entity === 'suppliers' ? 'TRADER_COMPANY_UPDATED' : 'UPDATE';
     await api.logAudit(updateAudit, entity, id, entity === 'other_income' ? { before: oldData, after: { ...oldData, ...data } } : data).catch((error) => console.warn('Audit write skipped after primary update:', error?.code || error?.message));
     if (entity === 'employees' && Object.prototype.hasOwnProperty.call(data, 'base_salary') && Number(data.base_salary) !== Number(oldData.base_salary)) await api.logAudit('EMPLOYEE_BASE_SALARY_CHANGED', entity, id, { before: oldData.base_salary ?? null, after: data.base_salary ?? null }).catch((error) => console.warn('Audit write skipped after salary update:', error?.code || error?.message));
@@ -1964,6 +2105,7 @@ export const api = {
 
   remove: async (entity, id, reason = '') => {
     await requireEntityPermission(entity, 'delete');
+    if (entity === 'employees') return api.permanentlyDeleteEmployee(id, reason);
     const itemRef = ref(db, `${entity}/${id}`);
     const oldSnap = await get(itemRef);
     const oldData = oldSnap.exists() ? oldSnap.val() : null;
@@ -2392,7 +2534,6 @@ async function resolveSession(user) {
   else if (currentUserProfile.role === 'cashier') perms = [...cashierDefaultPermissionKeys];
   else if (currentUserProfile.role === 'employee') perms = ['purchases.create', 'expenses.create', 'sales.create'];
   else if (currentUserProfile.role === 'viewer') perms = ['dashboard.view', 'reports.view'];
-  if (perms.includes('expenses.create')) perms.push('pos.view');
   const session = { user: currentUserProfile, permissions: perms };
   console.info('ROLE_LOAD_SUCCESS', { role: currentUserProfile.role, permissionCount: perms.length });
   console.info('SESSION_READY');

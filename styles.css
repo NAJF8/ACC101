@@ -30,6 +30,23 @@
   font-synthesis: none;
 }
 
+.pos-page .pos-tabs { overflow-x: auto; justify-content: flex-start; }
+.pos-filters { align-items: end; flex-wrap: wrap; gap: 10px; }
+.pos-filters label { display: grid; gap: 4px; min-width: 145px; }
+.pos-filters select { min-height: 38px; }
+.pos-two-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+.pos-bars { display: grid; gap: 12px; padding: 8px 0; }
+.pos-bar-row { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.pos-bar-row > div { height: 10px; background: #edf1ed; border-radius: 999px; overflow: hidden; }
+.pos-bar-row i { display: block; height: 100%; background: linear-gradient(90deg, #1f7a4d, #d4a24c); border-radius: inherit; }
+.pos-bar-row b { white-space: nowrap; font-size: 12px; }
+@media (max-width: 760px) {
+  .pos-two-col { grid-template-columns: 1fr; }
+  .pos-bar-row { grid-template-columns: 82px minmax(0, 1fr); }
+  .pos-bar-row b { grid-column: 2; }
+  .pos-filters label, .pos-filters select { width: 100%; min-width: 0; }
+}
+
 * { box-sizing: border-box; }
 html, body { overflow-x: hidden; margin: 0; }
 body { direction: rtl; background: var(--bg); }

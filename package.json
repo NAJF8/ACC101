@@ -8,6 +8,8 @@
     "start": "vite --host localhost",
     "build": "vite build",
     "test:finance": "node scripts/finance-regression.mjs",
+    "test:pos": "node scripts/pos-regression.mjs && node scripts/pos-emulator-e2e.mjs",
+    "backfill:pos-read-model": "node scripts/pos-read-model-backfill.mjs",
     "test:monthly-expenses-detail": "node scripts/monthly-expenses-detail-regression.mjs",
     "test:employee-lifecycle": "node scripts/employee-lifecycle-regression.mjs",
     "test:permissions": "node scripts/permissions-emulator-regression.mjs",

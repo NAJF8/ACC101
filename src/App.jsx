@@ -56,6 +56,7 @@ import { aggregateFinancialTimeline, buildDateRangeFinancialAggregation, buildMo
 import { buildInventorySalesAnalytics, filterExpiry, expiryStatus, inventoryBaseUnitCost, inventoryValue, isAmbiguousInventoryUnit, locationBalances, lowStockStatus, movementConsumptionBySource, normalizeBarcode, sortHistory, sortLowStock, packageEquivalent, packageSize } from "./services/inventory.js";
 import { cameraMessages, createBarcodeCameraController } from "./services/barcodeCamera.js";
 import { assetCategoryIdFromRecord } from "./services/audit-center.js";
+import { amountOf, buildCashierRows, buildPosReconciliation, calculatePosSummary, dateOf, filterPosRows, isActiveSale, isPosRow } from "./services/pos.js";
 
 const money = (v) =>
   `${Number(v || 0).toLocaleString("en-US", { maximumFractionDigits: 0 })} د.ع`;
@@ -174,11 +175,9 @@ const auditValueText = (value) => {
 const roleLabel = getRoleLabel;
 const nav = [
   ["dashboard", "الرئيسية", Home],
-  ["today", "اليوم في 101", CalendarDays],
+  ["pos", "POS", BarChart3],
   ["alerts", "مركز التنبيهات", Bell],
-  ["payment_review", "مراجعة طرق الدفع", Receipt],
   ["shifts", "الورديات", WalletCards],
-  ["account_review", "مراجعة الحسابات", ShieldCheck],
   ["purchases", "المشتريات", ShoppingCart],
   ["sales", "المبيعات", BarChart3],
   ["products", "المنتجات", Coffee],
@@ -193,7 +192,6 @@ const nav = [
   ["historical_imports", "الاستيراد التاريخي", FileSpreadsheet],
   ["suppliers", "التجار والشركات", Package],
   ["debts", "الديون والآجل", WalletCards],
-  ["cash", "حركة الصندوق", WalletCards],
   ["partners", "الشركاء ورأس المال", Users],
   ["establishment", "تكاليف التأسيس والافتتاح", Building2],
   ["reports", "التقارير", ClipboardList],
@@ -203,6 +201,7 @@ const nav = [
   ["system_reset", "تصفير النظام وبدء حسابات جديدة", ShieldCheck],
 ];
 const pagePermissions = {
+  pos: "pos.view",
   today: "dashboard.view",
   alerts: "alerts.view",
   payment_review: "payment_review.edit",
@@ -259,6 +258,7 @@ export function App() {
     [fromDate, setFromDate] = useState(""),
     [toDate, setToDate] = useState(""),
     [appliedRange, setAppliedRange] = useState({ mode: "month", month: currentMonth() }),
+    [pendingNewAction, setPendingNewAction] = useState(""),
     [notifications, setNotifications] = useState([]),
     [notificationOpen, setNotificationOpen] = useState(false),
     [readNotificationIds, setReadNotificationIds] = useState([]),
@@ -294,6 +294,11 @@ export function App() {
     document.addEventListener("app:navigate", h);
     return () => document.removeEventListener("app:navigate", h);
   }, [session]);
+  useEffect(() => {
+    if (!pendingNewAction || active !== pendingNewAction) return;
+    document.dispatchEvent(new CustomEvent("app:new-action", { detail: pendingNewAction }));
+    setPendingNewAction("");
+  }, [active, pendingNewAction]);
   useEffect(() => {
     if (toast) {
       const t = setTimeout(() => setToast(""), 3200);
@@ -425,6 +430,7 @@ export function App() {
               title={isSelectedMonthClosed ? "الشهر المحدد مغلق — انتقل إلى شهر مفتوح لإضافة عملية جديدة" : ""}
               onClick={() => {
                 if (active === "dashboard") {
+                  setPendingNewAction("sales");
                   setActive("sales");
                   return;
                 }
@@ -673,7 +679,7 @@ function Screen({ active, canPage, ...p }) {
   if (!canPage(active)) return <AccessDenied />;
   const map = {
     dashboard: Dashboard,
-    today: TodayPage,
+    pos: PosPage,
     alerts: AlertsPage,
     payment_review: PaymentReviewPage,
     shifts: ShiftsPage,
@@ -707,6 +713,38 @@ function Screen({ active, canPage, ...p }) {
 function AccessDenied() {
   return <div className="empty"><ShieldCheck size={25} /><strong>لا تملك صلاحية عرض هذه الصفحة</strong><span>اطلب من مدير النظام منحك الصلاحية المناسبة.</span></div>;
 }
+
+function PosPage({ selectedMonth, can = () => false }) {
+  const monthStart = selectedMonth && selectedMonth !== "all" ? `${selectedMonth}-01` : "";
+  const monthEnd = selectedMonth && selectedMonth !== "all" ? `${selectedMonth}-${String(new Date(Number(selectedMonth.slice(0, 4)), Number(selectedMonth.slice(5, 7)), 0).getDate()).padStart(2, "0")}` : "";
+  const [tab, setTab] = useState("overview"), [rows, setRows] = useState({ sales: [], expenses: [], movements: [], shifts: [] }), [filters, setFilters] = useState({ fromDate: monthStart, toDate: monthEnd, cashier: "", shift: "", payment: "", orderType: "" }), [selectedSale, setSelectedSale] = useState(null), [loading, setLoading] = useState(true), [error, setError] = useState("");
+  useEffect(() => setFilters((old) => ({ ...old, fromDate: monthStart, toDate: monthEnd })), [monthStart, monthEnd]);
+  useEffect(() => {
+    let live = true; setLoading(true); setError("");
+    api.listPosData()
+      .then(({ sales, expenses, movements, shifts }) => live && setRows({ sales: sales.filter(isPosRow), expenses: expenses.filter(isPosRow), movements: movements.filter((row) => String(row.source_key || "").startsWith("pos101:")), shifts: shifts.filter((row) => row.source_channel === "POS101" || row.cashier_uid || row.cashier_name) }))
+      .catch((err) => live && setError(userFacingError(err, "تعذر قراءة بيانات POS من مسارات ACC101.")))
+      .finally(() => live && setLoading(false));
+    return () => { live = false; };
+  }, [selectedMonth]);
+  const accSales = filterPosRows(rows.sales.filter(isActiveSale), filters), accExpenses = filterPosRows(rows.expenses, filters), sales = accSales.filter(isPosRow), expenses = accExpenses.filter(isPosRow), movements = filterPosRows(rows.movements, filters), shifts = filterPosRows(rows.shifts, filters);
+  const summary = calculatePosSummary({ sales, expenses, movements }), cashierRows = buildCashierRows({ sales, expenses, shifts }), reconciliation = buildPosReconciliation({ posSales: sales, accSales, posExpenses: expenses, accExpenses });
+  const setFilter = (key, value) => setFilters((old) => ({ ...old, [key]: value }));
+  const tabs = [["overview", "نظرة عامة"], ["sales", "المبيعات"], ["expenses", "المصاريف"], ["payments", "طرق الدفع"], ["cashiers", "الكاشير والورديات"], ["reports", "التقارير"], ["reconciliation", "المطابقة المالية"]];
+  const filterBar = <div className="toolbar pos-filters"><label><span>من</span><input type="date" value={filters.fromDate} onChange={(e) => setFilter("fromDate", e.target.value)} /></label><label><span>إلى</span><input type="date" value={filters.toDate} onChange={(e) => setFilter("toDate", e.target.value)} /></label><select aria-label="كاشير" value={filters.cashier} onChange={(e) => setFilter("cashier", e.target.value)}><option value="">كل الكاشير</option>{[...new Map([...rows.sales, ...rows.expenses].map((row) => [row.cashier_uid || row.cashier_name, row.cashier_name || row.cashier_uid])).entries()].filter(([id]) => id).map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select><select aria-label="وردية" value={filters.shift} onChange={(e) => setFilter("shift", e.target.value)}><option value="">كل الورديات</option>{rows.shifts.map((row) => <option key={row.id} value={row.id}>{operationReference(row, "SHIFT")}</option>)}</select><select aria-label="طريقة الدفع" value={filters.payment} onChange={(e) => setFilter("payment", e.target.value)}><option value="">كل طرق الدفع</option><option value="cash">نقدي</option><option value="electronic">إلكتروني</option></select></div>;
+  const cards = [["إجمالي مبيعات الفترة", summary.salesTotal], ["عدد الطلبات", summary.orderCount], ["إجمالي النقدي", summary.cashSales], ["إجمالي الإلكتروني", summary.electronicSales], ["إجمالي المصاريف", summary.expensesTotal], ["صافي الحركة", summary.net], ["متوسط الفاتورة", summary.averageTicket]];
+  if (loading) return <div className="screen-stack"><Panel title="POS" action="قراءة بيانات POS المرتبطة بـ ACC101"><LoadingBlock /></Panel></div>;
+  if (error) return <div className="screen-stack"><Panel title="POS"><div className="error">{error}</div></Panel></div>;
+  return <div className="screen-stack pos-page"><Panel title="POS" action="مصدر تشغيلي للـ POS — لا يغيّر بيانات المطابقة تلقائياً"><div className="settings-tabs pos-tabs">{tabs.map(([id, label]) => <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>{label}</button>)}</div>{filterBar}{tab === "overview" && <><div className="report-summary-grid pos-kpis">{cards.map(([label, value]) => <div className="report-summary-card" key={label}><span>{label}</span><strong>{label === "عدد الطلبات" ? Number(value).toLocaleString("ar-IQ") : money(value)}</strong></div>)}</div><div className="pos-two-col"><Panel title="المبيعات حسب اليوم"><PosBars rows={sales} /></Panel><Panel title="النقدي مقابل الإلكتروني"><PosBars rows={[{ label: "نقدي", value: summary.cashSales }, { label: "إلكتروني", value: summary.electronicSales }]} /></Panel></div><div className="notice"><strong>Net POS = POS Sales − POS Expenses</strong><span>هذا صافي حركة تشغيلية، وليس صافي الربح المحاسبي الكامل.</span></div></>}{tab === "sales" && <PosSalesTable rows={sales} onSelect={setSelectedSale} />}{tab === "expenses" && <PosExpensesTable rows={expenses} />}{tab === "payments" && <PosPayments summary={summary} sales={sales} />}{tab === "cashiers" && <PosCashiers rows={cashierRows} />}{tab === "reports" && <PosReports sales={sales} expenses={expenses} summary={summary} />}{tab === "reconciliation" && <PosReconciliation reconciliation={reconciliation} summary={summary} />}</Panel>{selectedSale && <Modal title={`تفاصيل الفاتورة — ${operationReference(selectedSale, "SALE")}`} onClose={() => setSelectedSale(null)}><div className="profile-list">{(selectedSale.items || []).map((item, index) => <div key={`${item.product_id || item.id || index}`}><strong>{item.product_name || item.item_name || item.name || "منتج"}</strong><span>{item.quantity || 0} × {money(item.unit_price || item.price || 0)} = {money(Number(item.quantity || 0) * Number(item.unit_price || item.price || 0))}</span></div>)}{!(selectedSale.items || []).length && <Empty text="لا توجد تفاصيل أصناف محفوظة لهذه الفاتورة." />}</div></Modal>}</div>;
+}
+
+function PosBars({ rows = [] }) { const grouped = rows.reduce((out, row) => { const key = row.label || dateOf(row) || "غير محدد"; out[key] = (out[key] || 0) + amountOf(row); return out; }, {}); const items = Object.entries(grouped); const max = Math.max(...items.map(([, value]) => value), 1); return <div className="pos-bars">{items.length ? items.map(([label, value]) => <div className="pos-bar-row" key={label}><span>{label}</span><div><i style={{ width: `${Math.max(4, value / max * 100)}%` }} /></div><b>{money(value)}</b></div>) : <Empty text="لا توجد بيانات في الفترة المحددة" />}</div>; }
+function PosSalesTable({ rows, onSelect }) { return <Panel title="مبيعات POS" action="الفواتير الملغاة مستبعدة من الإجماليات"><DataTable rows={rows} columns={[["id", "الفاتورة", (v, r) => operationReference(r, "SALE")], ["date", "التاريخ"], ["created_at", "الوقت", (v) => v ? new Date(v).toLocaleTimeString("ar-IQ") : "—"], ["cashier_name", "الكاشير"], ["shift_id", "الوردية"], ["order_type", "نوع الطلب"], ["payment_method", "الدفع", paymentMethodLabel], ["total_after_discount", "الصافي", money], ["status", "الحالة", (v) => v || "مكتملة"]]} rowActions={(row) => <button className="table-action" onClick={() => onSelect(row)}>التفاصيل</button>} /></Panel>; }
+function PosExpensesTable({ rows }) { return <Panel title="مصاريف POS" action="المصروف المرتبط يحمل reference ولا يُنشأ مرتين"><DataTable rows={rows} columns={[["date", "التاريخ"], ["cashier_name", "الكاشير"], ["shift_id", "الوردية"], ["description", "الوصف"], ["amount", "المبلغ", money], ["payment_method", "المصدر", paymentMethodLabel], ["notes", "ملاحظات"]]} /></Panel>; }
+function PosPayments({ summary, sales }) { const cashCount = sales.filter((row) => row.payment_method === "cash").length, electronicCount = sales.filter((row) => row.payment_method === "electronic").length; return <Panel title="طرق الدفع"><div className="report-summary-grid">{[["نقدي", cashCount, summary.cashSales], ["إلكتروني", electronicCount, summary.electronicSales]].map(([label, count, total]) => <div className="report-summary-card" key={label}><span>{label}</span><strong>{money(total)}</strong><small>{count} عملية</small></div>)}</div><div className="notice">Expected Cash: {money(summary.cashSales + summary.cashIn - summary.cashOut)} · Actual Cash: غير متوفر في المصدر الحالي · Variance: غير محسوب</div></Panel>; }
+function PosCashiers({ rows }) { return <Panel title="الكاشير والورديات"><DataTable rows={rows} columns={[["cashier_name", "الكاشير"], ["opened_at", "بداية الوردية"], ["closed_at", "نهاية الوردية"], ["invoice_count", "الفواتير"], ["cash_sales", "النقدي", money], ["electronic_sales", "الإلكتروني", money], ["expenses", "المصاريف", money], ["net", "صافي الوردية", money], ["status", "الحالة"]]} /></Panel>; }
+function PosReports({ sales, expenses, summary }) { return <Panel title="تقارير POS" action="الفترة والفلاتر أعلاه تطبق على كل الجداول"><div className="report-summary-grid">{[["المبيعات", summary.salesTotal], ["المصاريف", summary.expensesTotal], ["الصافي", summary.net], ["عدد الطلبات", summary.orderCount], ["متوسط الفاتورة", summary.averageTicket]].map(([label, value]) => <div className="report-summary-card" key={label}><span>{label}</span><strong>{label.includes("الطلبات") ? Number(value).toLocaleString("ar-IQ") : money(value)}</strong></div>)}</div><PosBars rows={sales} /><div className="notice">عدد سجلات المصاريف: {expenses.length} · عدد الفواتير: {sales.length}</div></Panel>; }
+function PosReconciliation({ reconciliation, summary }) { return <Panel title="المطابقة المالية" action="قراءة فقط — لا تعدّل Firebase"><div className="report-summary-grid">{[["POS Sales / ACC المرتبطة", reconciliation.sales], ["POS Expenses / ACC المرتبطة", reconciliation.expenses]].map(([label, row]) => <div className="report-summary-card" key={label}><span>{label}</span><strong>{row.status}</strong><small>POS {money(row.pos)} · ACC {money(row.acc)} · الفرق {money(row.difference)}</small></div>)}</div><div className="notice">POS Net: {money(summary.net)} · حالات المطابقة: MATCHED / DIFFERENCE. لا توجد كتابة أو تسوية تلقائية.</div></Panel>; }
 
 function TodayPage({ selectedMonth, can = () => false }) {
   const [data, setData] = useState(null);
@@ -1407,7 +1445,7 @@ function UnknownBarcode({ code, onAdd, onClose }) {
 function TransactionForm({ kind, initial, onDone, setToast, isMonthClosed = false }) {
   const purchase = kind === "purchases";
   const [form, setForm] = useState({ date: today(), purchase_type: "inventory", discount_type: "fixed", ...initial });
-  const saleOperationKey = useRef(null);
+  const saleOperationKey = useRef(null), purchaseOperationKey = useRef(null);
   const [categories, setCategories] = useState([]), [items, setItems] = useState([]), [suppliers, setSuppliers] = useState([]), [error, setError] = useState(""), [saving, setSaving] = useState(false);
   useEffect(() => { Promise.all([api.list(purchase && form.purchase_type === "inventory" ? "inventory_categories" : "product_categories"), api.list(purchase && form.purchase_type === "inventory" ? "inventory_items" : "products"), ...(purchase ? [api.list("suppliers").catch(() => [])] : [])]).then(([c, i, s]) => { setCategories(c); setItems(i); if (s) setSuppliers(s); }).catch((e) => setError(e.message)); }, [purchase, form.purchase_type]);
   const categoryKey = (value) => String(value || "").trim();
@@ -1431,12 +1469,13 @@ function TransactionForm({ kind, initial, onDone, setToast, isMonthClosed = fals
       const categoryName = categories.find((x) => x.id === form.category_id)?.name_ar || categories.find((x) => x.id === form.category_id)?.nameAr || "";
       const isInventoryPurchase = purchase && form.purchase_type === "inventory";
       const payload = purchase ? {
+        ...(!initial?.id ? { operation_key: purchaseOperationKey.current || (purchaseOperationKey.current = `ui-purchase-${Date.now()}-${Math.random().toString(36).slice(2)}`) } : {}),
         purchase_type: form.purchase_type,
         ...(isInventoryPurchase ? { inventory_item_id: form.item_id, inventory_item_name: itemName } : { product_id: form.item_id, product_name: itemName }),
         category_id: form.category_id,
         category_name: categoryName,
         quantity: Number(form.quantity),
-        unit: form.unit,
+        unit: form.unit || (isInventoryPurchase ? "" : "piece"),
         unit_price: Number(form.unit_price || 0),
         discount_type: form.discount_type || "fixed",
         discount_value: Number(form.discount_value || 0),
