@@ -200,6 +200,17 @@ const nav = [
   ["settings", "الإعدادات", Settings],
   ["system_reset", "تصفير النظام وبدء حسابات جديدة", ShieldCheck],
 ];
+const sidebarSections = [
+  { id: "dashboard", label: "لوحة التحكم", items: [["dashboard", "لوحة التحكم", Home]] },
+  { id: "pos-group", label: "الكاشير / POS", items: [["pos", "نظرة عامة", BarChart3], ["sales", "تقرير المبيعات", BarChart3], ["monthly_expenses", "تقرير المصاريف", Receipt], ["inventory", "تقرير المواد", Boxes], ["cash", "حركة الصندوق", WalletCards], ["shifts", "ملخص الورديات", WalletCards]] },
+  { id: "accounting-group", label: "المحاسبة", items: [["sales", "المبيعات", BarChart3], ["purchases", "المشتريات", ShoppingCart], ["expenses", "المصاريف", Receipt]] },
+  { id: "assets", label: "الأصول", items: [["assets", "الأصول", Building2]] },
+  { id: "partners", label: "الشركاء ورأس المال", items: [["partners", "الشركاء ورأس المال", Users]] },
+  { id: "establishment", label: "تكاليف التأسيس والافتتاح", items: [["establishment", "تكاليف التأسيس والافتتاح", Building2]] },
+  { id: "inventory", label: "المخزون", items: [["inventory", "المخزون", Boxes]] },
+  { id: "reports", label: "التقارير", items: [["reports", "التقارير", ClipboardList]] },
+  { id: "settings", label: "الإعدادات", items: [["settings", "الإعدادات", Settings]] },
+];
 const pagePermissions = {
   pos: "pos.view",
   today: "dashboard.view",
@@ -265,6 +276,7 @@ export function App() {
     [legacyPayrollModal, setLegacyPayrollModal] = useState(false),
     [showNewMonth, setShowNewMonth] = useState(false),
     [alertTarget, setAlertTarget] = useState(null);
+  const [openNavGroups, setOpenNavGroups] = useState({ "pos-group": true, "accounting-group": true });
   useEffect(() => {
     let mounted = true;
     setLoading(true);
@@ -335,26 +347,21 @@ export function App() {
             <span>Finance System</span>
           </div>
         </div>
-        <nav>
-          {nav
-            .filter(
-              ([id]) =>
-                id === "dashboard" ||
-                canPage(id),
-            )
-            .map(([id, label, Icon]) => (
-              <button
-                key={id}
-                className={active === id ? "active" : ""}
-                onClick={() => {
-                  setActive(id);
-                  setDrawer(false);
-                }}
-              >
-                <Icon size={19} />
-                <span>{label}</span>
+        <nav className="reference-nav">
+          {sidebarSections.map((section) => {
+            const visibleItems = section.items.filter(([id]) => id === "dashboard" || canPage(id));
+            if (!visibleItems.length) return null;
+            const isSingle = section.items.length === 1;
+            const expanded = isSingle || openNavGroups[section.id];
+            const SectionIcon = section.items[0][2];
+            return <div className={`nav-group ${isSingle ? "nav-group-single" : ""}`} key={section.id}>
+              <button className={`nav-group-toggle ${visibleItems.some(([id]) => id === active) ? "is-current" : ""}`} onClick={() => isSingle ? (setActive(visibleItems[0][0]), setDrawer(false)) : setOpenNavGroups((value) => ({ ...value, [section.id]: !value[section.id] }))}>
+                <span className="nav-group-label"><SectionIcon size={18} /><span>{section.label}</span></span>
+                {!isSingle && <ChevronDown size={15} className={expanded ? "rotated" : ""} />}
               </button>
-            ))}
+              {expanded && !isSingle && <div className="nav-group-items">{visibleItems.map(([id, label, Icon], index) => <button key={`${section.id}-${id}-${index}`} className={active === id ? "active" : ""} onClick={() => { setActive(id); setDrawer(false); }}><Icon size={16} /><span>{label}</span></button>)}</div>}
+            </div>;
+          })}
         </nav>
         <div className="sidebar-footer">
           <div className="user-card">
@@ -417,6 +424,7 @@ export function App() {
             </div>
           </div>
         </header>
+        {active === "dashboard" && <ReferenceFilterBar selectedMonth={selectedMonth} months={months} onMonthChange={(month) => { setSelectedMonth(month); setAppliedRange({ mode: "month", month }); }} />}
         <div className="page-head">
           <div>
             <p className="eyebrow">101 COFFEE FINANCE</p>
@@ -792,7 +800,98 @@ function ShiftsPage({ selectedMonth, can = () => false, setToast }) {
   const shiftActions = (row) => row.status === "open" && <button className="table-action" onClick={() => { setCounts({}); setSelected(row); }}>إغلاق وعدّ النقد</button>;
   return <div className="screen-stack"><Panel title="الورديات" action="فتح وإغلاق وردية مع عدّ الفئات النقدية"><form className="smart-form" onSubmit={open}><label><span>الرصيد الافتتاحي</span><input required type="number" min="0" value={form.opening_cash} onChange={e => setForm({ ...form, opening_cash: e.target.value })} /></label><label><span>ملاحظة</span><input value={form.note} onChange={e => setForm({ ...form, note: e.target.value })} /></label><button className="primary" disabled={!can("shifts.open")}>فتح وردية</button></form><div className="shift-mobile-cards">{rows.map((row) => <article className="shift-card" key={row.id}><div className="shift-card-head"><strong>{operationReference(row, "SHIFT")}</strong><span className={`status-badge status-${row.status}`}>{row.status === "open" ? "مفتوحة" : "مغلقة"}</span></div><p><b>الكاشير:</b> {row.cashier_name || "—"}</p><p><b>الافتتاح:</b> {money(row.opening_cash)}</p><p><b>المتوقع:</b> {row.expected_cash == null ? "—" : money(row.expected_cash)}</p><p><b>الفرق:</b> {row.difference == null ? "—" : money(row.difference)}</p>{shiftActions(row)}</article>)}</div><div className="shift-table"><DataTable rows={rows} columns={[["id", "رقم العملية", (v, r) => operationReference(r, "SHIFT")], ["cashier_name", "الكاشير"], ["opened_at", "فُتحت"], ["opening_cash", "الافتتاح", money], ["expected_cash", "المتوقع", (v) => v == null ? "—" : money(v)], ["status", "الحالة", v => v === "open" ? "مفتوحة" : "مغلقة"], ["difference", "الفرق", v => v == null ? "—" : money(v)]]} rowActions={shiftActions} /></div></Panel>{selected && <Modal title="إغلاق الوردية" onClose={() => setSelected(null)}><form className="smart-form shift-close-form" onSubmit={close}><div className="shift-close-summary wide"><div><span>المتوقع</span><strong>{money(expectedCash)}</strong></div><div><span>الفعلي</span><strong>{money(actualCash)}</strong></div><div className={difference < 0 ? "negative" : difference > 0 ? "positive" : "neutral"}><span>الفرق</span><strong>{difference === 0 ? "مطابق" : difference < 0 ? `عجز ${Math.abs(difference).toLocaleString("en-US")} د.ع` : `زيادة ${difference.toLocaleString("en-US")} د.ع`}</strong></div></div>{[50000, 25000, 10000, 5000, 1000, 500, 250].map((d) => <label key={d}><span>{money(d)} — عدد القطع</span><input type="number" min="0" inputMode="numeric" value={counts[d] || ""} onChange={e => setCounts({ ...counts, [d]: e.target.value })} /></label>)}<button className="primary wide" type="submit">اعتماد الإغلاق</button></form></Modal>}</div>;
 }
-function Dashboard({ setToast, can, canPage, selectedMonth, reportRange = { mode: "month", month: selectedMonth }, isMonthClosed, periodStatus, isSuperAdmin = false, canSeeSensitiveFinancial = false, onMonthClosed }) {
+function ReferenceFilterBar({ selectedMonth, months, onMonthChange }) {
+  const year = selectedMonth === "all" ? "all" : String(selectedMonth || currentMonth()).slice(0, 4);
+  const years = [...new Set((months || []).map((month) => String(month).slice(0, 4)))].sort().reverse();
+  return <section className="reference-filter-bar" aria-label="الفلاتر العامة">
+    <label className="reference-select"><span>القسم</span><select aria-label="فلتر الأقسام" defaultValue="all"><option value="all">كل الأقسام</option></select><ChevronDown size={15} /></label>
+    <label className="reference-select"><span>السنة</span><select aria-label="فلتر السنة" value={year} onChange={(event) => { const next = event.target.value; onMonthChange(next === "all" ? "all" : `${next}-01`); }}><option value="all">كل السنوات</option>{years.map((item) => <option key={item} value={item}>{item}</option>)}</select><CalendarDays size={15} /></label>
+    <label className="reference-select"><span>الفترة</span><select aria-label="فلتر الشهر" value={selectedMonth} onChange={(event) => onMonthChange(event.target.value)}><option value="all">كل الأشهر</option>{(months || []).filter((month) => month !== "all").map((month) => <option key={month} value={month}>{monthLabel(month)}</option>)}</select><CalendarDays size={15} /></label>
+    <button type="button" className="filter-icon-btn" aria-label="الفلاتر"><SlidersHorizontal size={19} /></button>
+    <div className="reference-filter-note"><Check size={19} /><div><strong>يتم تطبيق الفلتر على جميع أقسام النظام</strong><span>عرض البيانات بشكل موحد في جميع التقارير والأقسام</span></div></div>
+  </section>;
+}
+
+function Dashboard(props) {
+  return <ReferenceDashboard {...props} />;
+}
+
+function ReferenceDashboard({ setToast, can, canPage, selectedMonth, reportRange = { mode: "month", month: selectedMonth } }) {
+  const [bundle, setBundle] = useState(null), [chartMode, setChartMode] = useState("month");
+  useEffect(() => {
+    let live = true;
+    Promise.all([
+      api.dashboard(selectedMonth).catch(() => ({ metrics: {}, monthly: [], recent: [] })),
+      api.list("assets").catch(() => []),
+      api.listEstablishmentCosts().catch(() => ({ report: { total: 0 }, costs: [] })),
+      api.listPartnerCapital().catch(() => ({ documentedCapital: 0, partners: [] })),
+      api.list("sales").catch(() => []),
+      api.list("expenses").catch(() => []),
+      api.list("purchases").catch(() => []),
+      selectedMonth === "all" ? api.reportRange({ mode: "month", month: "all" }).catch(() => null) : Promise.resolve(null),
+    ]).then(([dashboard, assets, establishment, partners, sales, expenses, purchases, allReport]) => {
+      if (!live) return;
+      const activeAssets = assets.filter((row) => !row.deleted && !["archived", "inactive", "classified_elsewhere"].includes(row.status));
+      const assetTotal = activeAssets.reduce((sum, row) => sum + Number(row.total ?? row.amount ?? row.purchase_price ?? 0), 0);
+      const setupTotal = Number(establishment?.report?.total ?? establishment?.costs?.reduce((sum, row) => sum + Number(row.amount || 0), 0) ?? 0);
+      const monthRows = buildReferenceMonthRows({ sales, expenses, purchases, year: selectedMonth === "all" ? "all" : String(selectedMonth).slice(0, 4) });
+      const pendingBusinessDate = [...sales, ...expenses].filter((row) => String(row.source || row.source_type || "").toUpperCase().includes("POS") && !row.businessDate && !row.business_date && !row.deleted).length;
+      const todayKey = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Baghdad", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+      const activeRows = (rows) => rows.filter((row) => !row.deleted && row.status !== "cancelled" && row.status !== "voided");
+      const businessDate = (row) => String(row.businessDate || row.business_date || row.date || "").slice(0, 10);
+      const posSalesToday = activeRows(sales).filter((row) => String(row.source || row.source_type || "").toUpperCase().includes("POS") && businessDate(row) === todayKey);
+      const posExpensesToday = activeRows(expenses).filter((row) => String(row.source || row.source_type || "").toUpperCase().includes("POS") && businessDate(row) === todayKey);
+      const allMetrics = selectedMonth === "all" ? { ...(dashboard.metrics || {}), revenue: allReport?.summary?.netSales ?? activeRows(sales).reduce((sum, row) => sum + Number(row.total_after_discount ?? row.amount ?? row.total ?? 0), 0), purchases: allReport?.summary?.purchases ?? activeRows(purchases).reduce((sum, row) => sum + Number(row.total_after_discount ?? row.total_price ?? row.amount ?? row.total ?? 0), 0), expenses: allReport?.summary?.operatingExpenses ?? activeRows(expenses).filter((row) => !row.establishment_reclassified).reduce((sum, row) => sum + Number(row.amount ?? row.total ?? 0), 0), todaySales: posSalesToday.reduce((sum, row) => sum + Number(row.total_after_discount ?? row.amount ?? row.total ?? 0), 0), todayExpenses: posExpensesToday.reduce((sum, row) => sum + Number(row.amount ?? row.total ?? 0), 0), todaySalesCount: posSalesToday.length, todayPurchases: activeRows(purchases).filter((row) => businessDate(row) === todayKey).reduce((sum, row) => sum + Number(row.total_after_discount ?? row.total_price ?? row.amount ?? row.total ?? 0), 0) } : (dashboard.metrics || {});
+      const recent = selectedMonth === "all" && allReport?.rows ? [...(allReport.rows.sales || []).map((row) => ({ ...row, label: `بيع ${row.product_name || row.item || "منتج"}`, amount: Number(row.total_after_discount ?? row.amount ?? row.total ?? 0) })), ...(allReport.rows.expenses || []).map((row) => ({ ...row, label: row.description || row.category_name || "مصروف", amount: Number(row.amount ?? row.total ?? 0) }))].sort((a, b) => String(businessDate(b)).localeCompare(String(businessDate(a)))).slice(0, 5) : (dashboard.recent || []);
+      setBundle({ dashboard, metrics: allMetrics, assets: assetTotal, setup: setupTotal, capital: Number(partners?.documentedCapital ?? 0), monthRows, pendingBusinessDate, recent });
+    });
+    return () => { live = false; };
+  }, [selectedMonth]);
+  if (!bundle) return <Loader />;
+  const m = bundle.metrics;
+  const moneyOrZero = (value) => money(value == null ? 0 : value);
+  const primary = [
+    ["إجمالي الأصول", bundle.assets, Building2, "mint"],
+    [selectedMonth === "all" ? "إجمالي المصاريف" : "مصاريف الفترة", m.expenses, Receipt, "rose"],
+    ["تكاليف التأسيس والافتتاح", bundle.setup, ClipboardList, "gold"],
+    ["الشركاء ورأس المال", bundle.capital, Users, "neutral"],
+  ];
+  const secondary = [
+    ["مبيعات POS اليوم", m.todaySales, ShoppingCart, "mint", "مبيعات مرتبطة بالمصدر POS101"],
+    ["مصاريف POS اليوم", m.todayExpenses, Receipt, "rose", "مصروفات المصدر POS101"],
+    ["مواد مستخدمة / تكلفة المواد", m.todayPurchases ?? m.purchases, Package, "violet", `${Number(m.materialCount || 0).toLocaleString("ar-IQ")} مادة مسجلة`],
+    ["عدد الفواتير اليوم", m.todaySalesCount, FileSpreadsheet, "blue", "الفواتير الفعالة فقط"],
+  ];
+  const quick = [["POS الكاشير", "pos", ShoppingCart], ["المبيعات", "sales", BarChart3], ["المشتريات", "purchases", ShoppingCart], ["المصاريف", "expenses", Receipt], ["الأصول", "assets", Building2], ["الشركاء ورأس المال", "partners", Users], ["تكاليف التأسيس", "establishment", ClipboardList], ["المخزون", "inventory", Boxes], ["التقارير", "reports", BarChart3]];
+  const chartRows = chartMode === "year" ? [{ label: selectedMonth === "all" ? "كل السنوات" : String(selectedMonth).slice(0, 4), sales: bundle.monthRows.reduce((sum, row) => sum + row.sales, 0), expenses: bundle.monthRows.reduce((sum, row) => sum + row.expenses, 0), materials: bundle.monthRows.reduce((sum, row) => sum + row.materials, 0) }] : bundle.monthRows;
+  const go = (id) => document.dispatchEvent(new CustomEvent("app:navigate", { detail: id }));
+  return <div className="screen-stack reference-dashboard">
+    <section className="reference-period-status"><div><strong>الفترة المالية: {selectedMonth === "all" ? "كل الأشهر" : monthLabel(selectedMonth)}</strong><span>قراءة مباشرة من سجلات ACC وPOS المرتبطة</span></div><span className="status-pill open"><i />مفتوح</span></section>
+    <section className="reference-kpi-grid">{primary.map(([label, value, Icon, tone]) => <article className={`reference-kpi-card tone-${tone}`} key={label}><div className="reference-kpi-icon"><Icon size={24} /></div><div><span>{label}</span><strong>{moneyOrZero(value)}</strong><small>من البيانات الفعلية للفترة المحددة</small></div></article>)}</section>
+    <section className="reference-kpi-grid secondary">{secondary.map(([label, value, Icon, tone, note]) => <article className={`reference-kpi-card secondary-card tone-${tone}`} key={label}><div className="reference-kpi-icon"><Icon size={21} /></div><div><span>{label}</span><strong>{label.includes("الفواتير") ? Number(value || 0).toLocaleString("ar-IQ") : moneyOrZero(value)}</strong><small>{note}</small></div></article>)}</section>
+    {bundle.pendingBusinessDate > 0 && <button className="reference-warning" type="button" onClick={() => go("sales")}><Bell size={18} /><span>يوجد {bundle.pendingBusinessDate.toLocaleString("ar-IQ")} سجل POS تاريخي يحتاج تحديد اليوم التشغيلي</span><ChevronDown size={16} /></button>}
+    <section className="reference-main-grid">
+      <Panel title="آخر الحركات المرتبطة بين POS و ACC" action="أحدث العمليات المحاسبية المرتبطة تلقائيًا من نظام الكاشير إلى نظام المحاسبة"><div className="reference-panel-head"><span>النوع · الوصف · المبلغ · الحالة</span><button className="secondary" onClick={() => go("sales")}>عرض الكل</button></div><div className="reference-transactions">{bundle.recent.length ? bundle.recent.map((row, index) => <div className="reference-transaction" key={`${row.id || row.date}-${index}`}><span className={`transaction-type ${String(row.source || row.source_type || "").toUpperCase().includes("POS") ? "sales" : "expense"}`}>{String(row.source || row.source_type || "").toUpperCase().includes("POS") ? "مبيعات POS" : "حركة مالية"}</span><span className="transaction-description">{row.label || row.description || "عملية مالية"}</span><b>{money(row.amount || row.total || 0)}</b><span className="status-pill synced"><i />مُرحّل</span></div>) : <Empty text="لا توجد حركات مسجلة للفترة" />}</div></Panel>
+      <Panel title="المبيعات والمصاريف والمواد" action="بيانات POS وACC حسب أشهر السنة"><div className="chart-toolbar"><div className="chart-toggle"><button className={chartMode === "month" ? "active" : ""} onClick={() => setChartMode("month")}>شهري</button><button className={chartMode === "year" ? "active" : ""} onClick={() => setChartMode("year")}>سنوي</button></div><div className="reference-legend"><span><i className="sales-dot" />المبيعات</span><span><i className="expense-dot" />مصاريف POS</span><span><i className="material-dot" />تكلفة المواد</span></div></div><ReferenceBars rows={chartRows} /></Panel>
+    </section>
+    <section className="reference-section-title"><h2>الوصول السريع</h2><span>اختصارات للوحدات المالية الأكثر استخدامًا</span></section>
+    <section className="reference-quick-grid">{quick.filter(([, id]) => canPage(id)).map(([label, id, Icon]) => <button key={id} onClick={() => go(id)}><Icon size={22} /><span>{label}</span></button>)}</section>
+  </div>;
+}
+
+function buildReferenceMonthRows({ sales, expenses, purchases, year }) {
+  const rows = Array.from({ length: 12 }, (_, index) => ({ label: new Intl.DateTimeFormat("ar-IQ", { month: "short" }).format(new Date(2026, index, 1)), sales: 0, expenses: 0, materials: 0 }));
+  const add = (list, key) => list.forEach((row) => { if (row.deleted) return; const date = String(row.businessDate || row.business_date || row.date || row.created_at || ""); const month = Number(date.slice(5, 7)); const rowYear = date.slice(0, 4); if (!month || (year !== "all" && rowYear !== year)) return; rows[month - 1][key] += Number(row.total_after_discount ?? row.total_price ?? row.amount ?? row.total ?? 0); });
+  add(sales, "sales"); add(expenses, "expenses"); add(purchases, "materials");
+  return rows;
+}
+
+function ReferenceBars({ rows }) {
+  const max = Math.max(1, ...rows.flatMap((row) => [row.sales, row.expenses, row.materials]));
+  return <div className="reference-chart" aria-label="رسم بياني للمبيعات والمصاريف والمواد">{rows.map((row) => <div className="reference-chart-column" key={row.label}><div className="reference-bars"><i className="bar-sales" style={{ height: `${Math.max(4, row.sales / max * 100)}%` }} /><i className="bar-expenses" style={{ height: `${Math.max(4, row.expenses / max * 100)}%` }} /><i className="bar-materials" style={{ height: `${Math.max(4, row.materials / max * 100)}%` }} /></div><span>{row.label}</span></div>)}</div>;
+}
+
+function LegacyDashboard({ setToast, can, canPage, selectedMonth, reportRange = { mode: "month", month: selectedMonth }, isMonthClosed, periodStatus, isSuperAdmin = false, canSeeSensitiveFinancial = false, onMonthClosed }) {
   const [data, setData] = useState(null),
     [pins, setPins] = useState([]),
     [comparisonData, setComparisonData] = useState(null),
