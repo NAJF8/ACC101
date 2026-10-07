@@ -28,6 +28,8 @@
     "test:month-carry": "node scripts/month-carry-regression.mjs",
     "test:improvements": "node scripts/notification-regression.mjs && node scripts/improvements-emulator-regression.mjs",
     "test:rules-matrix": "node scripts/rules-matrix-regression.mjs",
+    "test:pos-functions": "node scripts/pos-functions-emulator-regression.mjs",
+    "test:pos-direct-rtdb": "node scripts/pos-direct-rtdb-regression.mjs",
     "test:closed-month": "node scripts/closed-month-rules-regression.mjs",
     "test:payment-review": "node scripts/payment-review-regression.mjs",
     "test:shift": "node scripts/shift-regression.mjs",
